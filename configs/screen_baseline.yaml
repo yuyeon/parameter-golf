@@ -1,0 +1,21 @@
+name: screen_baseline
+
+train:
+  budget_mode: tokens           # primary comparison: matched token count
+  budget_value: 16000000        # 16M tokens (~500 steps @ 32K batch)
+  train_batch_tokens: 32768
+  max_wallclock_seconds: 300    # wallclock safety cap (secondary)
+  warmup_steps: 5
+  warmdown_iters: 150
+  seed: 1337
+
+eval:
+  val_batch_seqs: 8
+  eval_compiled: true
+
+vram:
+  max_gb: 10.0
+
+data:
+  seq_len: 1024
+  train_shards: 10

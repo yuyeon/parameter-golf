@@ -1,0 +1,14 @@
+name: audit_baseline
+
+train:
+  budget_mode: tokens           # matched-token comparison
+  budget_value: 64000000        # 64M tokens (~2000 steps @ 32K batch)
+  train_batch_tokens: 32768
+  max_wallclock_seconds: 1200   # wallclock safety cap
+  warmdown_iters: 300
+
+eval:
+  val_batch_seqs: 8
+
+vram:
+  max_gb: 10.0

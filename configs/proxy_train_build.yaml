@@ -1,0 +1,14 @@
+name: proxy_train_build
+
+data:
+  train_shards: 10
+
+# Subset construction metadata.
+metadata:
+  strategy: contiguous
+  description: >
+    Training data subset uses the first N contiguous shards.
+    The contiguous strategy avoids random shard selection so that
+    proxy-train data composition is reproducible without an external
+    manifest, and the resulting data distribution stays close to
+    what the full training run would see.

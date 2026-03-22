@@ -1,0 +1,12 @@
+name: long_context_val
+
+data:
+  seq_len: 2048
+
+eval:
+  sliding_window: true
+  sliding_stride: 64
+  val_batch_seqs: 4
+
+vram:
+  max_gb: 10.0

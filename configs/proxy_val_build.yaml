@@ -1,0 +1,21 @@
+name: proxy_val_build
+
+data:
+  seq_len: 1024
+
+# Subset construction metadata.
+# These fields are not part of ProxyConfig but document how
+# proxy_val_tune, proxy_val_audit, and proxy_val_long manifests
+# are built.
+metadata:
+  n_tune: 2000
+  n_audit: 2000
+  n_long: 500
+  strategy: mixed
+  description: >
+    proxy_val_tune (2000 seqs) is used during iterative screening
+    to pick promising candidates. proxy_val_audit (2000 disjoint seqs)
+    is held out and only used once per candidate to confirm the ranking.
+    proxy_val_long (500 seqs at 2048 tokens) tests long-context ideas.
+    The mixed strategy selects sequences spanning difficulty quantiles
+    so that both easy and hard-to-predict text are represented.
