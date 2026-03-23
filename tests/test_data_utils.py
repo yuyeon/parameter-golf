@@ -210,6 +210,32 @@ class TestSubsetManifestFingerprint:
         )
         assert len(m.fingerprint) == 16  # first 16 hex chars of SHA-256
 
+    def test_different_shard_ids_different_fingerprint(self):
+        """Train subsets with different shard_ids must have different fingerprints."""
+        m1 = SubsetManifest(
+            name="train_a", split="train", strategy="contiguous",
+            seq_len=1024, seq_ids=[], shard_ids=[0, 1, 2],
+        )
+        m2 = SubsetManifest(
+            name="train_a", split="train", strategy="contiguous",
+            seq_len=1024, seq_ids=[], shard_ids=[5, 6, 7],
+        )
+        assert m1.fingerprint != m2.fingerprint
+
+    def test_shard_ids_none_vs_empty_list(self):
+        """shard_ids=None should produce a different fingerprint than shard_ids=[]."""
+        m1 = SubsetManifest(
+            name="test", split="val", strategy="random",
+            seq_len=1024, seq_ids=[0, 1],
+        )
+        m2 = SubsetManifest(
+            name="test", split="val", strategy="random",
+            seq_len=1024, seq_ids=[0, 1], shard_ids=[],
+        )
+        # shard_ids=None means val subset (no shard info), shard_ids=[] is an
+        # explicit empty train subset -- these should differ
+        assert m1.fingerprint != m2.fingerprint
+
 
 # ---------------------------------------------------------------------------
 # extract_sequences

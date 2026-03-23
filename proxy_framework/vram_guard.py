@@ -1,16 +1,86 @@
 """
-VRAM guard utilities for RTX 3080 12GB.
+VRAM guard utilities for local GPU training.
 
 Enforces a strict peak VRAM cap (default 10.0 GB) on all local runs.
-Provides a context manager, a decorator, and a periodic-check helper.
+Provides a context manager, a periodic-check helper, and GPU detection
+for parallel experiment scheduling.
 """
 
 import threading
 import time
+from dataclasses import dataclass
 
 import torch
 
 DEFAULT_MAX_GB = 10.0
+PARALLEL_HEADROOM_GB = 4.0  # Reserve for CUDA context overhead per process
+
+
+@dataclass
+class GPUInfo:
+    """Detected GPU information."""
+    name: str
+    total_vram_gb: float
+    compute_capability: tuple[int, int] = (0, 0)
+    multi_processor_count: int = 0
+
+
+def detect_gpu(device: int = 0) -> GPUInfo:
+    """Detect GPU type and total VRAM.
+
+    Returns GPUInfo with name and total VRAM.  If CUDA is unavailable,
+    returns a placeholder with 0 VRAM.
+    """
+    if not torch.cuda.is_available():
+        return GPUInfo(name="none", total_vram_gb=0.0)
+    props = torch.cuda.get_device_properties(device)
+    return GPUInfo(
+        name=props.name,
+        total_vram_gb=round(props.total_memory / (1024 ** 3), 1),
+        compute_capability=(props.major, props.minor),
+        multi_processor_count=props.multi_processor_count,
+    )
+
+
+def max_parallel_workers(
+    total_vram_gb: float,
+    per_worker_gb: float = DEFAULT_MAX_GB,
+    headroom_gb: float = PARALLEL_HEADROOM_GB,
+) -> int:
+    """Calculate how many parallel experiments fit on this GPU.
+
+    Each worker needs ``per_worker_gb`` for model/data plus a share of
+    ``headroom_gb`` for CUDA context overhead (driver buffers, etc.).
+    """
+    if total_vram_gb <= 0 or per_worker_gb <= 0:
+        return 0
+    # Each process needs per_worker_gb + a per-process CUDA context cost (~0.5-1GB)
+    per_process_context_gb = 1.0
+    usable = total_vram_gb - headroom_gb
+    if usable <= 0:
+        return 0
+    workers = int(usable / (per_worker_gb + per_process_context_gb))
+    return max(1, workers) if total_vram_gb >= per_worker_gb else 0
+
+
+def memory_fraction_for_worker(
+    total_vram_gb: float,
+    n_workers: int,
+    headroom_gb: float = PARALLEL_HEADROOM_GB,
+) -> float:
+    """Compute per-process CUDA memory fraction for ``n_workers`` on this GPU.
+
+    Returns a fraction (0.0, 1.0] suitable for
+    ``torch.cuda.set_per_process_memory_fraction()``.
+    """
+    if n_workers <= 1:
+        return 1.0
+    # Divide usable VRAM equally among workers
+    usable = total_vram_gb - headroom_gb
+    per_worker = usable / n_workers
+    fraction = per_worker / total_vram_gb
+    # Clamp to a reasonable range
+    return max(0.1, min(1.0, round(fraction, 3)))
 
 
 def _bytes_to_gb(b: int) -> float:

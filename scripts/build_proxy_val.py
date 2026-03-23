@@ -428,11 +428,49 @@ def main():
         default=1024,
         help="Sequence length (default: 1024).",
     )
+    parser.add_argument(
+        "--train-finalists",
+        type=str,
+        default=None,
+        help="Path to train-subset finalists.json from sweep_train_subsets.py. "
+             "When provided, final proxy_val subsets are built relative to "
+             "these train-subset finalists (Stage 4 of the staged procedure). "
+             "The finalists metadata is recorded in the output manifests.",
+    )
     args = parser.parse_args()
 
     profile_dir = Path(args.profile_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # -----------------------------------------------------------------------
+    # Stage-4 gate: verify train-subset finalists exist
+    # -----------------------------------------------------------------------
+    train_finalists_meta = None
+    if args.train_finalists:
+        finalists_path = Path(args.train_finalists)
+        if not finalists_path.exists():
+            print(f"[ERROR] Train finalists file not found: {finalists_path}")
+            sys.exit(1)
+        with open(finalists_path) as f:
+            train_finalists_meta = json.load(f)
+        n_fin = len(train_finalists_meta.get("finalists", []))
+        print(f"\n[Stage 4] Building final proxy_val subsets relative to "
+              f"{n_fin} train-subset finalist(s):")
+        for fin in train_finalists_meta.get("finalists", []):
+            print(f"  #{fin['rank']} {fin['candidate_id']} "
+                  f"(composite={fin.get('composite_score', 'N/A'):.3f})")
+        print(f"  Methodology: {train_finalists_meta.get('methodology', 'N/A')}")
+        print()
+    else:
+        print("\n[WARNING] No --train-finalists provided. Building proxy_val "
+              "subsets WITHOUT train-subset finalist context.")
+        print("  Recommended workflow:")
+        print("    1. python scripts/generate_train_candidates.py")
+        print("    2. python scripts/sweep_train_subsets.py")
+        print("    3. python scripts/build_proxy_val.py --train-finalists "
+              "artifacts/train_subset_sweep/selection/finalists.json")
+        print()
 
     rng = np.random.default_rng(args.seed)
 
@@ -543,6 +581,17 @@ def main():
         "models_profiled": model_names,
         "total_pool_sequences": total_seqs,
     }
+    # Record train-subset finalist context (Stage 4 provenance)
+    if train_finalists_meta:
+        metadata_common["train_subset_finalists"] = {
+            "n_finalists": len(train_finalists_meta.get("finalists", [])),
+            "finalist_ids": [
+                f["candidate_id"]
+                for f in train_finalists_meta.get("finalists", [])
+            ],
+            "reference_source": train_finalists_meta.get("reference_source", ""),
+            "methodology": train_finalists_meta.get("methodology", ""),
+        }
 
     # proxy_val_tune
     tune_manifest = SubsetManifest(

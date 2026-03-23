@@ -145,6 +145,8 @@ class SubsetManifest:
         h = hashlib.sha256()
         h.update(self.name.encode())
         h.update(str(sorted(self.seq_ids)).encode())
+        if self.shard_ids is not None:
+            h.update(str(sorted(self.shard_ids)).encode())
         h.update(str(self.seq_len).encode())
         return h.hexdigest()[:16]
 

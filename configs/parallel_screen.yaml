@@ -1,0 +1,35 @@
+# Parallel screening configuration for large-GPU environments (A40, A100, etc.)
+#
+# Each experiment uses the same per-worker VRAM cap and budget as a single
+# RTX 3080 screening run, so results transfer directly to the target hardware.
+#
+# Usage:
+#   python scripts/run_parallel_screen.py \
+#       --records-dir records/track_10min_16mb \
+#       --output-dir parallel_results/batch_001
+
+name: parallel_screen
+
+train:
+  budget_mode: tokens
+  budget_value: 16000000        # 16M tokens per experiment
+  train_batch_tokens: 32768
+  max_wallclock_seconds: 300
+  warmup_steps: 5
+  warmdown_iters: 150
+  seed: 1337
+
+eval:
+  val_batch_seqs: 8
+  eval_compiled: true
+
+vram:
+  max_gb: 10.0                  # Per-worker cap (matches 3080)
+
+data:
+  seq_len: 1024
+  train_shards: 10
+
+# Parallel-specific settings (used by run_parallel_screen.py CLI args):
+#   --max-workers: auto-detected from GPU (A40=4, A100-80GB=6)
+#   --seeds: 1337 (single seed for screening, multiple for audit)
