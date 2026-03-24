@@ -213,6 +213,8 @@ def _run_single_experiment(
         "DATA_PATH": str(data_dir),
         "TOKENIZER_PATH": str(tokenizer_path),
         "SEED": str(spec.seed),
+        # Force consistent eval seq_len so BPB is comparable across submissions
+        "EVAL_SEQ_LEN": str(budget.seq_len),
     })
     env.update(budget_env)
     env.update(spec.extra_env)

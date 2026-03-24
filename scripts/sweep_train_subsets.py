@@ -155,8 +155,16 @@ def _run_one(
     mem_fraction: float,
     conda_env: str,
     seed: int,
+    timeout_sec: float = 0,
+    proxy_val_manifest: str = "",
+    extra_env: dict | None = None,
 ) -> dict:
-    """Train one model on one candidate's shards and return metrics."""
+    """Train one model on one candidate's shards, then optionally evaluate
+    on a proxy_val_tune manifest.
+
+    Returns a result dict with separate train-proxy and eval-proxy metrics.
+    The run_summary.json is ALWAYS written, even on timeout or error.
+    """
     run_dir = output_dir / candidate.candidate_id / model_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -169,7 +177,6 @@ def _run_one(
     )
 
     tokenizer_path = (source_data_dir.parent.parent / "tokenizers" / "fineweb_1024_bpe.model").resolve()
-    # Fall back: try the standard location
     if not tokenizer_path.exists():
         tokenizer_path = (REPO_ROOT / "data" / "tokenizers" / "fineweb_1024_bpe.model").resolve()
 
@@ -187,12 +194,14 @@ def _run_one(
         "DATA_PATH": str(shard_dir),
         "TOKENIZER_PATH": str(tokenizer_path),
         "SEED": str(seed),
+        "EVAL_SEQ_LEN": str(budget_spec.seq_len),
     })
     env.update(budget_env)
+    if extra_env:
+        env.update(extra_env)
 
     script_abs = str(Path(script_path).resolve())
 
-    # Build command: use conda_env wrapper if available, else plain python
     if conda_env == "none":
         python_cmd = ["python", "-u"]
     else:
@@ -212,7 +221,17 @@ def _run_one(
     log_path = run_dir / "train.log"
     wall_t0 = time.time()
     proc = None
+    timed_out = False
+    parsed = {}
+    steps = 0
+    tokens = 0
+    rc = -1
+    eval_proxy_bpb = 0.0
+    eval_proxy_vram_gb = 0.0
+
     try:
+        # ----- Phase 1: Training subprocess -----
+        checkpoint_copied = False
         with open(log_path, "w") as lf:
             proc = subprocess.Popen(
                 cmd, env=env,
@@ -222,82 +241,193 @@ def _run_one(
             for line in proc.stdout:
                 lf.write(line)
                 lf.flush()
-            proc.wait()
+                # Eagerly copy checkpoint as soon as the submission saves it.
+                # This happens BEFORE the slow sliding-window eval, so we can
+                # grab the checkpoint and kill the process without losing it.
+                if not checkpoint_copied and "Serialized model" in line:
+                    for artifact in ("final_model.pt", "final_model.int8.ptz"):
+                        src = work_dir / artifact
+                        if src.exists():
+                            shutil.copy2(str(src), str(run_dir / artifact))
+                    checkpoint_copied = True
+                if timeout_sec > 0 and (time.time() - wall_t0) > timeout_sec:
+                    proc.kill()
+                    timed_out = True
+                    break
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                timed_out = True
+
+        rc = proc.returncode if proc and not timed_out else (0 if timed_out else -1)
+
+        log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+        parsed = _parse_metrics(log_text)
+        steps = parsed.get("steps_completed", 0)
+        tokens = budget_spec.batch_tokens * steps
+
+        # Copy checkpoint if not already eagerly copied
+        if not checkpoint_copied:
+            for artifact in ("final_model.pt", "final_model.int8.ptz"):
+                src = work_dir / artifact
+                if src.exists():
+                    shutil.copy2(str(src), str(run_dir / artifact))
+
+        # ----- Phase 2: Eval-proxy on proxy_val_tune -----
+        checkpoint = run_dir / "final_model.pt"
+        if proxy_val_manifest and checkpoint.exists() and steps > 0:
+            try:
+                eval_result = _eval_on_proxy_val(
+                    script_path=script_abs,
+                    checkpoint_path=str(checkpoint),
+                    val_manifest_path=proxy_val_manifest,
+                    max_gb=10.0,
+                )
+                eval_proxy_bpb = eval_result.get("proxy_val_bits_per_token", 0)
+                eval_proxy_vram_gb = eval_result.get("eval_vram_peak_gb", 0)
+            except Exception as eval_exc:
+                with open(run_dir / "eval_proxy_error.txt", "w") as ef:
+                    ef.write(str(eval_exc))
+
     except Exception as e:
+        # Catch-all: still write run_summary below
+        parsed["_error"] = str(e)
+        rc = -1
+
+    finally:
+        # ----- ALWAYS write run_summary, even on timeout/crash -----
         wall_elapsed = time.time() - wall_t0
+        budget_iters = int(budget_env.get("ITERATIONS", "0"))
+        budget_wc = float(budget_env.get("MAX_WALLCLOCK_SECONDS", "0"))
+
+        if steps >= budget_iters and budget_iters > 0:
+            exhausted = "iterations"
+        elif wall_elapsed >= budget_wc * 0.95:
+            exhausted = "wallclock"
+        elif timed_out:
+            exhausted = "sweep_timeout"
+        else:
+            exhausted = "incomplete"
+
+        train_vram_mib = parsed.get("peak_vram_mib", 0)
+        vram_status = "measured" if train_vram_mib > 0 else "unknown"
+
+        summary = RunSummary(
+            run_name=f"{candidate.candidate_id}__{model_name}",
+            model_name=model_name,
+            config_path=script_abs,
+            seed=seed,
+            git_commit=RunSummary._get_git_commit(),
+            budget_mode=budget_spec.mode,
+            budget_value=budget_spec.value,
+            target_seq_len=1024,
+            effective_batch_tokens=budget_spec.batch_tokens,
+            tokens_processed=tokens,
+            optimizer_steps=steps,
+            train_wallclock_sec=round(wall_elapsed, 2),
+            train_loss=parsed.get("train_loss", 0),
+            budget_exhausted=exhausted,
+            eval_mode="train_proxy+eval_proxy",
+            pre_quant_val_bpb=parsed.get("val_bpb", 0),
+            post_quant_val_bpb=parsed.get("post_quant_bpb", 0),
+            proxy_val_tune_bpb=eval_proxy_bpb,
+            artifact_bytes=parsed.get("artifact_bytes", 0),
+            peak_vram_allocated_gb=round(train_vram_mib / 1024, 3),
+            peak_vram_reserved_gb=eval_proxy_vram_gb,  # reuse field for eval VRAM
+            status="completed" if (rc == 0 or timed_out) and steps > 0 else "failed",
+            failure_reason=parsed.get("_error", "") or (
+                "" if rc == 0 or timed_out else f"exit code {rc}"
+            ),
+        )
+        summary.compute_derived()
+        save_run_summary(summary, run_dir / "run_summary.json")
+
+        # Write VRAM status file for audit
+        with open(run_dir / "vram_status.txt", "w") as vf:
+            vf.write(f"train_vram: {vram_status} ({train_vram_mib} MiB)\n")
+            vf.write(f"eval_vram: {'measured' if eval_proxy_vram_gb > 0 else 'unknown'} "
+                     f"({eval_proxy_vram_gb:.3f} GB)\n")
+            vf.write(f"timed_out: {timed_out}\n")
+
         cleanup_shard_dir(work_dir)
-        return {
-            "candidate_id": candidate.candidate_id,
-            "model_name": model_name,
-            "success": False,
-            "error": str(e),
-            "wallclock_sec": round(wall_elapsed, 2),
-        }
 
-    wall_elapsed = time.time() - wall_t0
-    rc = proc.returncode if proc else -1
-
-    log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
-    parsed = _parse_metrics(log_text)
-
-    # Copy artifacts
-    for artifact in ("final_model.pt", "final_model.int8.ptz"):
-        src = work_dir / artifact
-        if src.exists():
-            shutil.copy2(str(src), str(run_dir / artifact))
-
-    # Build RunSummary
-    steps = parsed.get("steps_completed", 0)
-    tokens = budget_spec.batch_tokens * steps
-    budget_iters = int(budget_env.get("ITERATIONS", "0"))
-    budget_wc = float(budget_env.get("MAX_WALLCLOCK_SECONDS", "0"))
-
-    if steps >= budget_iters and budget_iters > 0:
-        exhausted = "iterations"
-    elif wall_elapsed >= budget_wc * 0.95:
-        exhausted = "wallclock"
-    else:
-        exhausted = "incomplete"
-
-    summary = RunSummary(
-        run_name=f"{candidate.candidate_id}__{model_name}",
-        model_name=model_name,
-        config_path=script_abs,
-        seed=seed,
-        git_commit=RunSummary._get_git_commit(),
-        budget_mode=budget_spec.mode,
-        budget_value=budget_spec.value,
-        target_seq_len=1024,
-        effective_batch_tokens=budget_spec.batch_tokens,
-        tokens_processed=tokens,
-        optimizer_steps=steps,
-        train_wallclock_sec=round(wall_elapsed, 2),
-        train_loss=parsed.get("train_loss", 0),
-        budget_exhausted=exhausted,
-        eval_mode="full_train_val",
-        pre_quant_val_bpb=parsed.get("val_bpb", 0),
-        post_quant_val_bpb=parsed.get("post_quant_bpb", 0),
-        artifact_bytes=parsed.get("artifact_bytes", 0),
-        peak_vram_allocated_gb=round(parsed.get("peak_vram_mib", 0) / 1024, 3),
-        status="completed" if rc == 0 else "failed",
-        failure_reason="" if rc == 0 else f"exit code {rc}",
-    )
-    summary.compute_derived()
-    save_run_summary(summary, run_dir / "run_summary.json")
-
-    cleanup_shard_dir(work_dir)
-
+    success = (rc == 0 or timed_out) and steps > 0
     return {
         "candidate_id": candidate.candidate_id,
         "model_name": model_name,
-        "success": rc == 0,
-        "val_bpb": parsed.get("val_bpb"),
+        "success": success,
+        "train_proxy_bpb": parsed.get("val_bpb"),
+        "eval_proxy_bpb": eval_proxy_bpb if eval_proxy_bpb > 0 else None,
         "post_quant_bpb": parsed.get("post_quant_bpb"),
         "train_loss": parsed.get("train_loss"),
         "steps_completed": steps,
         "tokens_processed": tokens,
         "wallclock_sec": round(wall_elapsed, 2),
         "peak_vram_mib": parsed.get("peak_vram_mib", 0),
+        "timed_out": timed_out,
+        "vram_status": vram_status,
+    }
+
+
+def _eval_on_proxy_val(
+    script_path: str,
+    checkpoint_path: str,
+    val_manifest_path: str,
+    max_gb: float,
+) -> dict:
+    """Evaluate a checkpoint on proxy_val_tune via a SUBPROCESS.
+
+    Runs ``scripts/_eval_proxy_subprocess.py`` which imports the
+    submission's own model code, making it work for custom architectures
+    (SmearGate, BigramHash, etc.).
+
+    The subprocess produces ``proxy_val_bits_per_token`` (NOT bits-per-byte).
+    For ranking purposes, bits-per-token preserves the same ordering as BPB.
+    """
+    eval_script = REPO_ROOT / "scripts" / "_eval_proxy_subprocess.py"
+    result_path = Path(checkpoint_path).parent / "eval_proxy_result.json"
+
+    # Detect python command
+    import shutil as _shutil
+    _mamba = _shutil.which("micromamba")
+    if _mamba:
+        python_cmd = ["micromamba", "run", "-n", "parameter-golf", "python"]
+    else:
+        python_cmd = ["python"]
+
+    cmd = [
+        *python_cmd, str(eval_script),
+        "--script", script_path,
+        "--checkpoint", checkpoint_path,
+        "--manifest", val_manifest_path,
+        "--output", str(result_path),
+        "--max-gb", str(max_gb),
+    ]
+
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True,
+        timeout=600,  # 10 min max for eval
+        cwd=str(REPO_ROOT),
+    )
+
+    if not result_path.exists():
+        raise RuntimeError(
+            f"Eval subprocess produced no output. "
+            f"stderr: {proc.stderr[-500:] if proc.stderr else 'none'}"
+        )
+
+    with open(result_path) as f:
+        result = json.load(f)
+
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Eval failed: {result.get('error', 'unknown')}")
+
+    return {
+        "proxy_val_loss": result["proxy_val_mean_loss"],
+        "proxy_val_bits_per_token": result["proxy_val_bits_per_token"],
+        "proxy_val_n_seqs": result["proxy_val_n_seqs"],
+        "eval_vram_peak_gb": result["eval_vram_peak_gb"],
     }
 
 
@@ -351,6 +481,24 @@ def main():
     parser.add_argument("--output-dir", default="artifacts/train_subset_sweep")
     parser.add_argument("--n-finalists", type=int, default=3)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--timeout", type=float, default=0,
+        help="Per-run timeout in seconds (0=no timeout). Useful when some "
+             "submissions use slow sliding-window eval. The training-phase "
+             "val_bpb is still captured even if the post-training eval is killed.",
+    )
+    parser.add_argument(
+        "--proxy-val-manifest", default="",
+        help="Path to a proxy_val_tune manifest JSON. When provided, each run "
+             "loads its checkpoint after training and evaluates on this subset, "
+             "giving a separate eval-proxy BPB independent of the training "
+             "script's own eval.",
+    )
+    parser.add_argument(
+        "--extra-env", nargs="*", default=[],
+        help="Extra env vars to pass to ALL anchor scripts, as KEY=VALUE pairs. "
+             "E.g. --extra-env NUM_LAYERS=10 MATRIX_LR=0.02",
+    )
 
     args = parser.parse_args()
 
@@ -470,6 +618,13 @@ def main():
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {}
         for cand, name, path in work_items:
+            # Parse extra_env from CLI
+            cli_extra_env = {}
+            for kv in (args.extra_env or []):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    cli_extra_env[k] = v
+
             fut = pool.submit(
                 _run_one,
                 candidate=cand,
@@ -481,6 +636,9 @@ def main():
                 mem_fraction=use_frac,
                 conda_env=args.conda_env,
                 seed=args.seed,
+                timeout_sec=args.timeout,
+                proxy_val_manifest=args.proxy_val_manifest,
+                extra_env=cli_extra_env if cli_extra_env else None,
             )
             futures[fut] = (cand.candidate_id, name)
 
@@ -499,29 +657,39 @@ def main():
             all_results.append(result)
 
             status = "OK" if result.get("success") else "FAIL"
-            bpb = result.get("val_bpb")
-            bpb_s = f"BPB={bpb:.4f}" if bpb else "no BPB"
+            tbpb = result.get("train_proxy_bpb")
+            ebpb = result.get("eval_proxy_bpb")
+            tbpb_s = f"train={tbpb:.4f}" if tbpb else "no-train"
+            ebpb_s = f"eval={ebpb:.4f}" if ebpb else "no-eval"
+            vram_s = result.get("vram_status", "?")
             wc = result.get("wallclock_sec", 0)
             print(f"[sweep] [{completed}/{total_runs}] "
-                  f"{cid} × {mname}: {status} ({bpb_s}, {wc:.0f}s)")
+                  f"{cid} × {mname}: {status} "
+                  f"({tbpb_s}, {ebpb_s}, {wc:.0f}s, vram={vram_s})")
 
     total_wall = time.time() - wall_t0
     print(f"\n[sweep] All runs completed in {total_wall:.0f}s")
 
     # -----------------------------------------------------------------------
     # Collect scores and evaluate candidates
+    # Two separate score sets: train-proxy and eval-proxy
     # -----------------------------------------------------------------------
-    # Group results: {candidate_id: {model_name: best_bpb}}
-    sweep_scores: dict[str, dict[str, float]] = {}
+    train_proxy_scores: dict[str, dict[str, float]] = {}
+    eval_proxy_scores: dict[str, dict[str, float]] = {}
     for r in all_results:
         if not r.get("success"):
             continue
         cid = r["candidate_id"]
         mname = r["model_name"]
-        bpb = r.get("post_quant_bpb") or r.get("val_bpb")
-        if bpb:
-            sweep_scores.setdefault(cid, {})[mname] = bpb
+        tbpb = r.get("train_proxy_bpb")
+        ebpb = r.get("eval_proxy_bpb")
+        if tbpb:
+            train_proxy_scores.setdefault(cid, {})[mname] = tbpb
+        if ebpb:
+            eval_proxy_scores.setdefault(cid, {})[mname] = ebpb
 
+    # Use train_proxy as the primary score set (always available)
+    sweep_scores = train_proxy_scores
     if not sweep_scores:
         print("[ERROR] No successful runs. Cannot evaluate candidates.")
         sys.exit(1)
@@ -580,13 +748,36 @@ def main():
     finalists = select_finalists(evaluations, n_finalists=args.n_finalists)
 
     print(f"\n{'='*80}")
-    print("TRAIN SUBSET SWEEP RESULTS")
+    print("TRAIN SUBSET SWEEP — TRAIN-PROXY RANKINGS")
     print(f"{'='*80}\n")
     print(format_evaluation_table(evaluations, finalists))
 
+    # Eval-proxy rankings (if available)
+    eval_evaluations: list[CandidateEvaluation] = []
+    if eval_proxy_scores:
+        print(f"\n{'='*80}")
+        print("TRAIN SUBSET SWEEP — EVAL-PROXY RANKINGS")
+        print(f"{'='*80}\n")
+        for cand in all_candidates:
+            cid = cand.candidate_id
+            if cid not in eval_proxy_scores:
+                continue
+            ev = evaluate_candidate(
+                candidate_id=cid,
+                proxy_scores=eval_proxy_scores[cid],
+                ref_scores=reference,
+                family=cand.family,
+                shard_ids=cand.shard_ids,
+            )
+            eval_evaluations.append(ev)
+        eval_finalists = select_finalists(eval_evaluations, n_finalists=args.n_finalists)
+        print(format_evaluation_table(eval_evaluations, eval_finalists))
+    else:
+        print("\n[info] No eval-proxy scores available (no --proxy-val-manifest provided)")
+
     if finalists:
         print(f"\n{'='*80}")
-        print(f"TOP {len(finalists)} FINALISTS")
+        print(f"TOP {len(finalists)} FINALISTS (by train-proxy)")
         print(f"{'='*80}")
         for i, f in enumerate(finalists, 1):
             print(f"\n  #{i} {f.candidate_id}")

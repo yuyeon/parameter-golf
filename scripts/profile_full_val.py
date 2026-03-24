@@ -189,9 +189,25 @@ def profile_model(
     print(f"  Checkpoint: {ckpt_path}")
     print(f"{'='*70}")
 
-    # Import submission module and build model
+    # Import submission module and build model using submission-native constructor
     mod = import_submission(script_path)
-    model, hp = build_model(mod, device)
+    hp = mod.Hyperparameters()
+    # Use inspect.signature to discover GPT constructor params, supporting
+    # custom architectures (SmearGate, BigramHash, etc.)
+    import inspect
+    gpt_sig = inspect.signature(mod.GPT.__init__)
+    gpt_params = {}
+    for param_name in gpt_sig.parameters:
+        if param_name == "self":
+            continue
+        if hasattr(hp, param_name):
+            gpt_params[param_name] = getattr(hp, param_name)
+    model = mod.GPT(**gpt_params).to(device).bfloat16()
+    for module in model.modules():
+        if isinstance(module, mod.CastedLinear):
+            module.float()
+    if hasattr(mod, "restore_low_dim_params_to_fp32"):
+        mod.restore_low_dim_params_to_fp32(model)
 
     # Load checkpoint weights
     print(f"  Loading checkpoint ...")
