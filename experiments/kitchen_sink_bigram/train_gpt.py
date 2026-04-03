@@ -314,6 +314,9 @@ INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+# Int6 quantization: smaller dynamic range → better compression
+_USE_INT6 = bool(int(os.environ.get("USE_INT6", "0")))
+_INT_CLIP = 31 if _USE_INT6 else 127
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -327,24 +330,28 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
     return t
 
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+    clip = _INT_CLIP
     t32 = t.float()
     if t32.ndim == 2:
-        # Matrices get one scale per row, which usually tracks output-channel
-        # ranges much better than a single tensor-wide scale.
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+        # Per-row quantization with percentile search for best clip level
+        best_q, best_s, best_err = None, None, float('inf')
+        for pct_q in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            if pct_q < 1.0:
+                clip_abs = torch.quantile(t32.abs(), pct_q, dim=1)
+            else:
+                clip_abs = t32.abs().amax(dim=1)
+            scale = (clip_abs / clip).clamp_min(1.0 / clip)
+            q = torch.clamp(torch.round(t32 / scale.float()[:, None]), -clip, clip).to(torch.int8)
+            recon = q.float() * scale.float()[:, None]
+            err = (t32 - recon).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_s, best_err = q.contiguous(), scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous(), err
+        return best_q, best_s
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
+    scale = torch.tensor(clip_abs / clip if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -clip, clip).to(torch.int8).contiguous()
     return q, scale
 
 def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
