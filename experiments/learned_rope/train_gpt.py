@@ -535,8 +535,6 @@ class Rotary(nn.Module):
             self.register_buffer("inv_freq", init_freq, persistent=False)
         # When inv_freq is learnable, we can't cache cos/sin (they change every step)
         self._learnable = _learn
-        inv_freq = init_freq  # for cache init below
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._cos_cached: Tensor | None = None
         self._sin_cached: Tensor | None = None
