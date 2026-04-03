@@ -14,12 +14,17 @@ Winners go to 8×H100 for full evaluation.
 ### Known 1×H100 results:
 | Model | Steps@200 | BPB@200 | ms/step | Steps@600s | BPB@600s |
 |-------|-----------|---------|---------|------------|----------|
-| #1 (clean) | 200 | 1.9295 | 669 | ~680-900 | ~1.57-1.67* |
+| **#1 (clean)** | 200 | 1.9295 | 669 | **894** | **1.3813** |
 | #1 + MuonEq-R | 200 | — | — | 680 | 1.5741 |
-| FiLM 5→7+8xMLP | 200 | 1.6255 | 379 | 1601 | 1.2912 |
+| **FiLM 5→7+8xMLP** | 200 | 1.6255 | 379 | **1601** | **1.2912** |
 | Kitchen Sink | 200 | 1.6077 | 385 | ~1560 | 1.3656 |
 
-*extrapolated from MuonEq-R runs; clean 600s running now
+**KEY FINDING: FiLM beats #1 by 0.090 BPB on 1×H100 at 600s.**
+FiLM gets 1.79× more steps (375ms vs 671ms/step) and that speed advantage
+translates directly to better BPB. EMA is broken for both on 1 GPU (too few steps).
+
+Note: #1 uses BigramHash=3072, XSA-all, SmearGate, VE, EMA, banking, 786K batch.
+FiLM uses none of these but wins on raw training efficiency.
 
 ### Scaling extrapolation (speculative)
 FiLM 200→600s: 1.6255 → 1.2912 = -0.334 BPB for ~8× more steps
