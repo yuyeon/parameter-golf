@@ -161,3 +161,5 @@ FiLM 5→9 + LeakyReLU² 600s: 1.3648 BPB, 1135 steps — WORSE than ReLU² (1.3
 LeakyReLU² slows compile: 529ms/step vs 350ms for ReLU². KILL for FiLM.
 LowRank r=128: 1.9470 BPB, 1053ms/step — KILL (compile unfriendly)
 LowRank r=64: 2.0634 BPB, 719ms/step — KILL
+FiLM 5→9 + 4xMLP 600s: 1.3320 BPB, 1420 steps, 12.1MB — NEW BEST NOVEL
+Learned RoPE: 1.7702 BPB — KILL (compile overhead from recomputing cos/sin)
