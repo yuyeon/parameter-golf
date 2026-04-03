@@ -1942,11 +1942,14 @@ def main() -> None:
             avg_state[name] /= len(lawa_queue)
             avg_state[name] = avg_state[name].to(dtype=current_state[name].dtype)
         base_model.load_state_dict(avg_state, strict=True)
-    else:
+    elif step >= 2000:
+        # Only apply EMA if we've trained long enough for it to converge
         log0("ema:applying EMA weights")
         current_state = base_model.state_dict()
         avg_state = {name: t.to(dtype=current_state[name].dtype) for name, t in ema_state.items()}
         base_model.load_state_dict(avg_state, strict=True)
+    else:
+        log0(f"ema:skipping EMA (only {step} steps, need >=2000 for convergence)")
     torch.cuda.synchronize()
     t_diag = time.perf_counter()
     diag_val_loss, diag_val_bpb = eval_val(
