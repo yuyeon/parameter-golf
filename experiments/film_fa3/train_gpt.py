@@ -71,7 +71,9 @@ class Hyperparameters:
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
-    rope_dims = int(os.environ.get("ROPE_DIMS", 16))  # Partial RoPE: only first N dims get position encoding
+    rope_dims = int(os.environ.get("ROPE_DIMS", 0))  # Partial RoPE: 0=full RoPE (best for FiLM), 16=partial
+    late_qat_threshold = float(os.environ.get("LATE_QAT_THRESHOLD", 0.15))  # Enable fake int6 when LR scale < this
+    ema_decay = float(os.environ.get("EMA_DECAY", 0.997))
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -714,9 +716,19 @@ class RMSNorm(nn.Module):
 
 class CastedLinear(nn.Linear):
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
+    _qat_enabled: bool = False  # class-level flag, toggled during warmdown
+
     def forward(self, x: Tensor) -> Tensor:
+        w = self.weight.to(x.dtype)
+        if CastedLinear._qat_enabled and self.weight.ndim == 2 and self.weight.numel() > 65536:
+            # STE fake int6 quantization: forward uses quantized weights, backward uses real weights
+            with torch.no_grad():
+                amax = w.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+                scale = amax / 31.0
+                w_q = (w / scale).round().clamp(-31, 31) * scale
+            w = w + (w_q - w).detach()  # STE: gradient flows through w, forward uses w_q
         bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x, self.weight.to(x.dtype), bias)
+        return F.linear(x, w, bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -1227,6 +1239,10 @@ def main() -> None:
     # MAIN TRAINING LOOP
     # -----------------------------
 
+    # EMA state: track exponential moving average of all parameters
+    ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
+    ema_decay = args.ema_decay
+
     training_time_ms = 0.0
     stop_after_step: int | None = None
     torch.cuda.synchronize()
@@ -1269,6 +1285,12 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+
+        # Late QAT: enable fake int6 quantization during warmdown
+        if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
+            CastedLinear._qat_enabled = True
+            log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1295,6 +1317,11 @@ def main() -> None:
         for opt in optimizers:
             opt.step()
         zero_grad_all()
+
+        # EMA update every step
+        with torch.no_grad():
+            for name, t in base_model.state_dict().items():
+                ema_state[name].mul_(ema_decay).add_(t.detach().float(), alpha=1.0 - ema_decay)
 
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
@@ -1323,10 +1350,26 @@ def main() -> None:
     )
 
     # -----------------------------
-    # SERIALIZATION + ROUNDTRIP VALIDATION
+    # APPLY EMA + SERIALIZATION
     # -----------------------------
-    # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
+
+    # Apply EMA weights (smoothed average is better than final iterate)
+    if step >= 200:  # only apply if enough steps for EMA to converge
+        log0("ema:applying EMA weights")
+        avg_state = {name: t.to(dtype=base_model.state_dict()[name].dtype) for name, t in ema_state.items()}
+        base_model.load_state_dict(avg_state, strict=True)
+    else:
+        log0(f"ema:skipping EMA (only {step} steps, need >=200 for convergence)")
+
+    # Diagnostic: eval with EMA weights
+    torch.cuda.synchronize()
+    t_diag = time.perf_counter()
+    diag_val_loss, diag_val_bpb = eval_val(
+        args, model, rank, world_size, device, grad_accum_steps,
+        val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+    )
+    torch.cuda.synchronize()
+    log0(f"DIAGNOSTIC post_ema val_loss:{diag_val_loss:.4f} val_bpb:{diag_val_bpb:.4f} eval_time:{1000.0*(time.perf_counter()-t_diag):.0f}ms")
 
     if master_process:
         torch.save(base_model.state_dict(), "final_model.pt")
