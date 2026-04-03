@@ -39,5 +39,33 @@ This is speculative but the 1×H100 signal strongly favors FiLM.
 - [ ] #1 clean baseline on 1×H100 for 600s (in progress)
 - [ ] FiLM 5→7+8xMLP with int6 for 600s (queued)
 
-## Novel Ideas Under Investigation
-(see below — being developed while GPU experiments run)
+## Novel Ideas Implemented (ready to screen)
+
+### 1. FiLM + FA3 + Partial RoPE (`experiments/film_fa3/`)
+- **FA3**: Replace PyTorch SDPA with Flash Attention 3 (Hopper-native). Free speedup.
+- **Partial RoPE (16/64 dims)**: Only first 16 of 64 head dims get position encoding.
+  48 dims attend position-free (can learn position-invariant patterns).
+  Zero parameter cost, proven on #1 submission.
+- **Rationale**: More steps in 600s (FA3 speed) + better attention capacity (Partial RoPE).
+  Neither was tried on FiLM before. XSA was shown incompatible with FiLM, but Partial
+  RoPE is fundamentally different (changes encoding, not output processing).
+
+### 2. Differential Attention FiLM (`experiments/film_diffattn/`)
+- **Mechanism**: Each head splits into 2 sub-heads at head_dim/2. Two FA3 calls,
+  outputs subtracted with learnable lambda. Cancels attention noise.
+- **Parameter cost**: ~4 floats/head for lambda + GroupNorm ≈ negligible
+- **Compute cost**: 2× FA3 calls at half head_dim. Net similar FLOPs but more kernel overhead.
+- **Risk**: FA3 at head_dim=32 may be less efficient than at 64. Untested at <1B scale.
+- **Novel**: No submission or PR uses Differential Attention. This is genuinely new.
+
+### Research notes on rejected ideas
+- **Sigmoid Attention**: Can't use FA3 (requires custom kernel). Skip.
+- **Linear Attention / GLA / DeltaNet**: All need custom kernels slower than FA3. Skip.
+- **SwiGLU MLP**: 3 weight matrices vs 2 for same hidden dim = worse param efficiency at 8×MLP. Skip.
+- **LeakyReLU² for FiLM**: Already killed (compile overhead costs 50% more ms/step).
+
+## Experiment Queue (after SOTA baseline completes)
+1. FiLM 5→7+8xMLP with int6 (600s) — confirm artifact fits 16MB
+2. FiLM + FA3 + Partial RoPE 5→7+8xMLP (200 steps) — compare ms/step and BPP vs baseline FiLM
+3. FiLM + Differential Attention 5→7+8xMLP (200 steps) — novel mechanism screen
+4. If FA3/DiffAttn help: full 600s runs with int6
