@@ -701,15 +701,7 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.weight)
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
-        # Auxiliary denoising: randomly replace tokens and add reconstruction loss
-        denoise_rate = float(os.environ.get("DENOISE_RATE", "0.0"))
-        if self.training and denoise_rate > 0:
-            mask = torch.rand_like(input_ids.float()) < denoise_rate
-            noise_tokens = torch.randint_like(input_ids, 0, self.tok_emb.num_embeddings)
-            corrupted_ids = torch.where(mask, noise_tokens, input_ids)
-            x = self.tok_emb(corrupted_ids)
-        else:
-            x = self.tok_emb(input_ids)
+        x = self.tok_emb(input_ids)
 
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
