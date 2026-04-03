@@ -1,0 +1,34 @@
+logs/77b6755c-298b-449e-a85f-4dd6b91fd0e3.txt
+=== SUBMISSION: Recurrent GPT + BigramHash + XSA ===
+num_unique_blocks:3 effective_depth:9 depth_lora_rank:4
+bigram_buckets:2048 bigram_dim:128
+xsa_last_n:3 qat_fraction:0.0
+muon_weight_decay:0.0
+total_params:6429720 unique_block_params:5511192 adapter_params:64512
+block_schedule:[0, 1, 2, 0, 1, 2, 0, 1, 2]
+world_size:1 grad_accum_steps:8
+train_batch_tokens:524288 train_seq_len:1024
+warmup_step:10/20
+warmup_step:20/20
+step:0/200 val_loss:6.9352 val_bpb:4.1074 train_time:0ms step_avg:0.01ms
+step:1/200 train_loss:6.9353 train_time:377ms step_avg:377.10ms
+step:2/200 train_loss:16.7712 train_time:756ms step_avg:377.98ms
+step:3/200 train_loss:10.1465 train_time:1143ms step_avg:380.97ms
+step:4/200 train_loss:6.8080 train_time:1527ms step_avg:381.72ms
+step:5/200 train_loss:6.2634 train_time:1909ms step_avg:381.77ms
+step:6/200 train_loss:6.3863 train_time:2291ms step_avg:381.91ms
+step:7/200 train_loss:6.1957 train_time:2680ms step_avg:382.84ms
+step:8/200 train_loss:6.0619 train_time:3066ms step_avg:383.23ms
+step:9/200 train_loss:5.9015 train_time:3449ms step_avg:383.26ms
+step:10/200 train_loss:5.8007 train_time:3831ms step_avg:383.08ms
+step:50/200 train_loss:3.7963 train_time:19374ms step_avg:387.47ms
+step:100/200 train_loss:3.3970 train_time:39131ms step_avg:391.31ms
+step:100/200 val_loss:3.4098 val_bpb:2.0195 train_time:39131ms step_avg:391.31ms
+step:150/200 train_loss:3.2396 train_time:70589ms step_avg:470.59ms
+step:200/200 train_loss:3.0221 train_time:109231ms step_avg:546.15ms
+step:200/200 val_loss:3.0585 val_bpb:1.8114 train_time:109232ms step_avg:546.16ms
+peak memory: 10851 MiB
+artifact: 4246833 bytes + 54215 code = 4301048 total (compressor:zlib-9 quant:int6 payload_ratio:3.63x)
+artifact headroom: 11698952 bytes (11.699MB)
+final_int6_roundtrip val_loss:3.0647 val_bpb:1.8151 eval_time:28218ms
+final_int6_roundtrip_exact val_loss:3.06472994 val_bpb:1.81510570

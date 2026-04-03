@@ -1,0 +1,74 @@
+logs/77df5653-2050-4cc1-bf95-0f49e0135f08.txt
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:10
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:26993756
+mtp_num_heads:0 mtp_loss_weight:0.2 mtp_params:0
+XSA:last_11 active_layers:[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.035 head_lr:0.0 matrix_lr:0.025 scalar_lr:0.025
+train_batch_tokens:786432 train_seq_len:2048 iterations:20000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:42
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/20000 val_loss:6.9297 val_bpb:4.1042 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9303 train_time:1442ms step_avg:1442.22ms
+late_qat:enabled step:1 scale:0.1183
+step:2/20000 train_loss:8.6795 train_time:2754ms step_avg:1377.09ms
+step:3/20000 train_loss:8.4852 train_time:4168ms step_avg:1389.37ms
+step:4/20000 train_loss:8.1102 train_time:5622ms step_avg:1405.53ms
+step:5/20000 train_loss:7.6795 train_time:7061ms step_avg:1412.26ms
+step:6/20000 train_loss:7.3286 train_time:8491ms step_avg:1415.22ms
+step:7/20000 train_loss:6.9848 train_time:9907ms step_avg:1415.31ms
+step:8/20000 train_loss:6.7078 train_time:11300ms step_avg:1412.49ms
+step:9/20000 train_loss:6.4543 train_time:12729ms step_avg:1414.36ms
+step:10/20000 train_loss:6.2603 train_time:14176ms step_avg:1417.63ms
+swa:start step:50
+step:100/20000 train_loss:3.9620 train_time:141692ms step_avg:1416.92ms
+step:200/20000 train_loss:3.2832 train_time:283448ms step_avg:1417.24ms
+step:200/20000 val_loss:3.3186 val_bpb:1.9655 train_time:283751ms step_avg:1418.75ms
+step:300/20000 train_loss:3.0677 train_time:425248ms step_avg:1417.49ms
+step:400/20000 train_loss:3.0233 train_time:566643ms step_avg:1416.61ms
+step:400/20000 val_loss:2.9833 val_bpb:1.7669 train_time:566921ms step_avg:1417.30ms
+step:427/20000 val_loss:2.9778 val_bpb:1.7636 train_time:600221ms step_avg:1405.67ms
+stopping_early: wallclock_cap train_time:600221ms step:427/20000
+peak memory allocated: 23246 MiB reserved: 23484 MiB
+ema:applying EMA weights
+DIAGNOSTIC post_ema val_loss:8.8120 val_bpb:5.2189 eval_time:16260ms
+Serialized model: 106158518 bytes
+Code size: 102035 bytes
+gptq:building non-banked model for Hessian collection...
+gptq:generating autoregressive calibration data (64 seqs x 2048 tokens, temp=0.8)...
+gptq:generated 64 sequences in 186.7s
+gptq:collecting hessians from autoregressive data...
+gptq:collected hessians for 68 layers (AR self-gen)
+Traceback (most recent call last):
+  File "/home/devuser/parameter-golf/experiments/sota_muoneqr/train_gpt.py", line 2138, in <module>
+    main()
+  File "/home/devuser/parameter-golf/experiments/sota_muoneqr/train_gpt.py", line 1997, in main
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, hessians=hessians)
+  File "/home/devuser/parameter-golf/experiments/sota_muoneqr/train_gpt.py", line 1519, in mixed_quantize_int6
+    q, s = quantize_int6_gptq(t, hessian=H, clip_range=cr)
+  File "/home/devuser/parameter-golf/experiments/sota_muoneqr/train_gpt.py", line 1191, in quantize_int6_gptq
+    Hinv = torch.linalg.cholesky(H)
+torch._C._LinAlgError: linalg.cholesky: The factorization could not be completed because the input is not positive-definite (the leading minor of order 497 is not positive-definite).
