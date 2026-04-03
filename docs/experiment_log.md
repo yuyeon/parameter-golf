@@ -179,4 +179,18 @@ FiLM 1→9 + 30x MLP (extreme sharing): 2.4936 post-quant BPB, 1124ms — KILL
   Single block can't differentiate across 9 layers. Massive MLP = quantization-unfriendly.
 
 Key insight: FiLM is at a local optimum. Incremental modifications on familiar axes all fail.
-Next direction: completely novel architecture (gated convolutions, linear recurrence).
+GCS (all-conv): 1.9951 BPB at 402ms — KILL (FA3 makes attention unbeatable at 1024 tokens)
+
+## Round 5: Width-Depth Tradeoff (Novel Finding)
+
+FiLM 5→7 + 3xMLP (200 steps): 1.6466 BPB, 268ms — 23% faster than 5→9, only -0.011 BPB
+FiLM 5→7 + 8xMLP (200 steps): 1.6255 BPB, 379ms — BEATS 5→9+8xMLP (1.6279, 483ms) on ALL axes
+FiLM 5→7 + 10xMLP (200 steps): 1.6257 BPB, 429ms, 16.8MB — exceeds 16MB, marginal vs 8x
+FiLM 3→7 + 12xMLP (200 steps): 1.6444 BPB, 468ms — KILL (too few unique blocks)
+FiLM 5→7 + 8xMLP (600s): **1.2912 pre-quant, 1.2925 post-quant BPB**, 1601 steps, 375ms/step
+  BEATS FiLM 5→9 + 6xMLP (1.3141) by -0.0216 BPB (larger than MuonEq-R's -0.024!)
+  BUT artifact 20.0MB — exceeds 16MB. Needs int6 quantization to fit.
+
+Novel finding: shallower FiLM (5→7) + wider MLP beats deeper (5→9) + narrower MLP.
+Mechanism: 7 layers is sufficient depth; extra width improves per-token capacity more than depth.
+Implication: with int6 quantization, FiLM 5→7+8xMLP could reach ~1.29 BPB in 16MB.
