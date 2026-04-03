@@ -163,3 +163,4 @@ LowRank r=128: 1.9470 BPB, 1053ms/step — KILL (compile unfriendly)
 LowRank r=64: 2.0634 BPB, 719ms/step — KILL
 FiLM 5→9 + 4xMLP 600s: 1.3320 BPB, 1420 steps, 12.1MB — NEW BEST NOVEL
 Learned RoPE: 1.7702 BPB — KILL (compile overhead from recomputing cos/sin)
+FiLM 5→9 + 5xMLP 600s: 1.3179 BPB, 1507 steps, 13.9MB — NEW BEST NOVEL
