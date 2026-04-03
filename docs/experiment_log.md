@@ -156,3 +156,8 @@ Full-budget run in progress.
 XSA is incompatible with FiLM weight sharing: 1.6547 vs 1.6353 without XSA
 FiLM 5→9+3xMLP 600s: 1.3370 BPB, 1708 steps, 10.3MB — BEATS standard (1.3656)
 Parallel attn+MLP: 1.6700 BPB, 461ms — KILL
+
+FiLM 5→9 + LeakyReLU² 600s: 1.3648 BPB, 1135 steps — WORSE than ReLU² (1.3370, 1708 steps)
+LeakyReLU² slows compile: 529ms/step vs 350ms for ReLU². KILL for FiLM.
+LowRank r=128: 1.9470 BPB, 1053ms/step — KILL (compile unfriendly)
+LowRank r=64: 2.0634 BPB, 719ms/step — KILL
