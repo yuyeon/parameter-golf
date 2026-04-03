@@ -154,3 +154,5 @@ Full-budget run in progress.
 - **Best 500-step result**: 1.4200 BPB (Kitchen Sink + BigramHash)
 - **Single most impactful change**: MuonEq-R (-0.024 avg, 3 lines, zero overhead)
 XSA is incompatible with FiLM weight sharing: 1.6547 vs 1.6353 without XSA
+FiLM 5→9+3xMLP 600s: 1.3370 BPB, 1708 steps, 10.3MB — BEATS standard (1.3656)
+Parallel attn+MLP: 1.6700 BPB, 461ms — KILL
