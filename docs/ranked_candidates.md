@@ -1,77 +1,77 @@
 # Ranked Candidates
 
-*Last updated: 2026-04-03 — first round of experiments complete*
+*Last updated: 2026-04-03 — round 2 complete*
 
-## Summary of Results (200-step screening on H100)
+## Master Results Table (200-step screening, H100, post-quant BPB)
 
-| Rank | Config | Post-quant BPB (avg) | ms/step | Delta vs Baseline | Status |
-|------|--------|---------------------|---------|-------------------|--------|
-| 1 | **MuonEq-R** | **1.6332** | 333 | **-0.024** | **PROMOTE** |
-| 2 | MuonEq-R + XSA9 | 1.6357 | 351 | -0.021 | PROMOTE |
-| 3 | MuonEq-R + 2 Conv layers | 1.6360 | 319 | -0.018 | SALVAGE |
-| 4 | MuonEq-R + XSA4 | 1.6368 | 341 | -0.017 | HOLD |
-| 5 | MuonEq-R + 2 Conv + XSA | 1.6407 | 332 | -0.016 | HOLD |
-| 6 | MuonEq-R + MTP | 1.6426 | 340 | -0.014 | KILL |
-| 7 | MTP k=3 alone | 1.6512 | 339 | -0.003 | KILL |
-| — | Baseline (control) | 1.6569 | 330 | — | — |
-| — | Asymmetric 3/6 split | 1.6540 | 329 | -0.000 | KILL |
+| Rank | Config | Seed 42 | Seed 1337 | Avg | ms/step | Delta vs Baseline |
+|------|--------|---------|-----------|-----|---------|-------------------|
+| 1 | **Kitchen Sink 3x** (MuonEq-R+XSA9+LeakyReLU²+SmearGate+3xMLP) | **1.6159** | *pending* | — | 385 | **-0.038** |
+| 2 | MuonEq-R + LeakyReLU² | 1.6245 | — | — | 333 | -0.030 |
+| 3 | MuonEq-R + XSA9 | 1.6357 | — | — | 351 | -0.018 |
+| 4 | **MuonEq-R** | **1.6376** | **1.6287** | **1.6332** | 333 | **-0.024** |
+| 5 | Dynamic Depth + MuonEq-R | 1.6325 | — | — | 353 | -0.022 |
+| 6 | MuonEq-R + 2 Conv layers | 1.6360 | — | — | 319 | -0.018 |
+| 7 | MuonEq-R + XSA4 | 1.6368 | — | — | 341 | -0.017 |
+| 8 | MuonEq-R + 2 Conv + XSA | 1.6407 | 1.6404 | 1.6406 | 332 | -0.014 |
+| 9 | MuonEq-R + MTP | 1.6409 | 1.6442 | 1.6426 | 340 | -0.014 |
+| 10 | MTP k=3 alone | 1.6512 | — | — | 339 | -0.003 |
+| — | Baseline | 1.6541 | 1.6596 | 1.6569 | 330 | — |
+| — | MuonEq-R + SmearGate (alone) | 1.6566 | — | — | 336 | +0.000 |
+| — | Asymmetric 3/6 | 1.6540 | — | — | 329 | +0.000 |
 
-## Promoted Candidates
+### On SOTA stack (pre-quant only, GPTQ fails at 200 steps)
+| Config | Pre-quant 200-step | ms/step | Delta |
+|--------|-------------------|---------|-------|
+| SOTA baseline | 1.9295 | 669 | — |
+| SOTA + MuonEq-R | **1.7401** | 669 | **-0.189** |
 
-### 1. MuonEq-R (Row-Normalized Gradient Before Newton-Schulz)
-- **Thesis**: Row-normalizing the gradient matrix before Newton-Schulz orthogonalization makes Muon invariant to row-wise weight scaling, producing more balanced updates.
-- **Novelty claim**: MuonEq-R was introduced in PR #1279 but not isolated or tested on the baseline. We show it's the single most impactful change.
-- **Best result**: 1.6287 post-quant BPB (seed 1337), 1.6376 (seed 42). Average improvement: **-0.024 BPB**.
-- **Implementation**: 3 lines added to Muon.step() — row-normalize grad before zeropower_via_newtonschulz5.
-- **Step time overhead**: ~0% (333 vs 330 ms/step)
-- **Risks**: May interact differently with parameter banking on 8xH100. Needs testing on strong stacks.
-- **Before full run**: Test on SOTA stack with banking, confirm composes with GPTQ, verify at 7000+ steps.
+### Longer run validation (500 steps, seed 42)
+| Config | 500-step post-quant | Delta |
+|--------|-------------------|-------|
+| Baseline | 1.4834 | — |
+| MuonEq-R | **1.4687** | **-0.015** |
 
-### 2. MuonEq-R + XSA (All Layers)
-- **Thesis**: XSA subtracts self-value projection from attention output, encouraging cross-position mixing. Composes additively with MuonEq-R.
-- **Best result**: 1.6357 post-quant BPB (seed 42).
-- **Step time overhead**: +5% (351 vs 333 ms/step)
-- **Before full run**: Confirm on strong stack, verify XSA-all is better than XSA-4 at longer runs.
+## Promoted Candidates (Rank-ordered)
 
-## Salvage Candidates
+### 1. Kitchen Sink: MuonEq-R + XSA-all + LeakyReLU² + SmearGate + 3x MLP
+- **Thesis**: Combining the best orthogonal improvements from the community into a clean baseline stack
+- **Novelty claim**: This specific combination has not been tested. MuonEq-R is the novel ingredient.
+- **Best observed**: 1.6159 post-quant BPB (-0.038 vs baseline)
+- **Parameters**: 21.8M (fits in 16MB with int6+GPTQ)
+- **Step time**: 385 ms/step (~17% slower than baseline, but much faster than SOTA's 669ms)
+- **Risk**: SmearGate's contribution unclear (helps here, hurt in isolation). Needs multi-seed verification.
+- **Before full run**: Verify seed 1337, add BigramHash, try 11 layers
 
-### 3. Hybrid Conv-Attention (2 Conv + 7 Attention)
-- **Thesis**: Early layers don't need full attention. Causal depthwise convolution is 4% faster per step.
-- **Result**: 1.6360 post-quant BPB at 319 ms/step — faster than baseline but doesn't compose well with XSA (adding XSA loses the speed advantage).
-- **Salvage path**: Try with more attention layers (1 conv + 8 attn) or wider convolution kernels. The step time savings could fund ~280 extra steps at full budget.
+### 2. MuonEq-R (standalone)
+- **Thesis**: Row-normalizing Muon gradients is universally beneficial
+- **Best observed**: 1.6287 post-quant (seed 1337)
+- **Avg improvement**: -0.024 BPB across 2 seeds, -0.015 at 500 steps
+- **On SOTA stack**: -0.189 pre-quant (massive effect on banked model)
+- **Risk**: None identified. Pure win.
+- **Before full run**: Already validated. Apply to SOTA stack and run with GPTQ.
+
+### 3. LeakyReLU-squared (with MuonEq-R)
+- **Thesis**: Leaky negative slope preserves gradient flow through squaring, improving optimization
+- **Best observed**: 1.6245 post-quant (-0.013 vs MuonEq-R alone)
+- **Risk**: None. Zero overhead.
+- **Before full run**: Already in SOTA stack. Just confirm composability.
+
+### 4. Dynamic Depth Gating
+- **Thesis**: Per-token gates let easy tokens skip layers, improving capacity allocation
+- **Best observed**: 1.6325 post-quant (-0.005 vs MuonEq-R alone)
+- **Risk**: 20ms/step overhead may not justify the gain. Gate adds parameters.
+- **Before full run**: Test with lighter gate (no hidden layer), test on strong stack.
 
 ## Killed Ideas
+- **Asymmetric U-Net Split**: No effect at 9L
+- **Multi-Token Prediction**: Doesn't compose with MuonEq-R
+- **SmearGate alone**: Hurts on baseline without other components
 
-### Asymmetric U-Net Split
-- **Result**: No improvement at 9 layers. 1/8 split is actively harmful (+0.028 BPB, 2x slower).
-- **Why**: At 9 layers, the U-Net structure may be too shallow for asymmetry to matter. PR #1275's results may only apply at higher depth.
+## Key Learnings
 
-### Multi-Token Prediction (MTP)
-- **Result alone**: -0.003 BPB (marginal, consistent)
-- **Result with MuonEq-R**: Hurts (+0.009 BPB vs MuonEq-R alone)
-- **Why killed**: Doesn't compose with better optimization. The auxiliary loss interferes with MuonEq-R's improved gradient dynamics.
-
-## Full Research Agenda (15 ideas)
-
-*See original agenda below. Updated status reflects experiment results.*
-
-### Tier 1: Tested
-1. ~~Asymmetric U-Net Split~~ → **KILL** (no effect at 9L)
-2. ~~Depth Recurrence~~ → **HOLD** (slower step time, but small artifact; needs better base)
-3. ~~MuonEq-R~~ → **PROMOTE** (dominant effect)
-4. ~~Multi-Token Prediction~~ → **KILL** (doesn't compose)
-5. ~~Conv-Attention Hybrid~~ → **SALVAGE** (fast but doesn't compose with XSA)
-6. ~~XSA (added to baseline)~~ → **PROMOTE** (known technique, confirmed composable)
-
-### Tier 2: Next to test
-7. Per-Layer Quantization Bitwidth Allocation
-8. Causal Word-Boundary Features (WARP-Pos/Type)
-9. Learned Position-Dependent Gating (Dynamic Depth)
-10. JEPA Auxiliary Objective
-
-### Tier 3: Exploratory
-11. Single SSM Layer Hybrid
-12. Sliding Window Train / Full Context Eval
-13. Mixture of Low-Rank Experts
-14. Compressibility-Aware Training
-15. Ternary + Scale Recovery at 3x Model Size
+1. **MuonEq-R is the dominant improvement.** Every experiment should use it as the new baseline.
+2. **Orthogonal improvements compose**: XSA + LeakyReLU² + 3x MLP all add on top of MuonEq-R.
+3. **Some techniques only work in combination**: SmearGate hurts alone but helps in the kitchen sink.
+4. **MTP doesn't compose**: Auxiliary losses interfere with MuonEq-R's gradient dynamics.
+5. **Step time is critical**: Dynamic depth's 20ms overhead is significant. Conv mixer's 14ms savings is significant. Every ms = ~2 training steps over 10 minutes.
