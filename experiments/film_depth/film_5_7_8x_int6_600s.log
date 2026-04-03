@@ -1,0 +1,84 @@
+logs/79ebe136-a3f8-47c2-a1fd-a82d389c8418.txt
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+train_loader:dataset:fineweb10B_sp1024 train_shards:10
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+model_params:25443880
+world_size:1 grad_accum_steps:8
+sdp_backends:cudnn=False flash=True mem_efficient=False math=False
+attention_mode:gqa num_heads:8 num_kv_heads:4
+tie_embeddings:True embed_lr:0.05 head_lr:0.0 matrix_lr:0.04 scalar_lr:0.04
+train_batch_tokens:524288 train_seq_len:1024 iterations:20000 warmup_steps:20 max_wallclock_seconds:600.000
+seed:42
+warmup_step:1/20
+warmup_step:2/20
+warmup_step:3/20
+warmup_step:4/20
+warmup_step:5/20
+warmup_step:6/20
+warmup_step:7/20
+warmup_step:8/20
+warmup_step:9/20
+warmup_step:10/20
+warmup_step:11/20
+warmup_step:12/20
+warmup_step:13/20
+warmup_step:14/20
+warmup_step:15/20
+warmup_step:16/20
+warmup_step:17/20
+warmup_step:18/20
+warmup_step:19/20
+warmup_step:20/20
+step:0/20000 val_loss:6.9368 val_bpb:4.1083 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9364 train_time:372ms step_avg:371.57ms
+step:2/20000 train_loss:17.7086 train_time:752ms step_avg:376.12ms
+step:3/20000 train_loss:9.1063 train_time:1132ms step_avg:377.41ms
+step:4/20000 train_loss:6.3415 train_time:1521ms step_avg:380.25ms
+step:5/20000 train_loss:6.2715 train_time:1899ms step_avg:379.72ms
+step:6/20000 train_loss:6.3224 train_time:2280ms step_avg:380.07ms
+step:7/20000 train_loss:6.1196 train_time:2663ms step_avg:380.46ms
+step:8/20000 train_loss:6.0821 train_time:3040ms step_avg:380.06ms
+step:9/20000 train_loss:6.0558 train_time:3426ms step_avg:380.67ms
+step:10/20000 train_loss:6.0186 train_time:3809ms step_avg:380.87ms
+step:100/20000 train_loss:3.1918 train_time:38352ms step_avg:383.52ms
+step:200/20000 train_loss:2.6960 train_time:76767ms step_avg:383.83ms
+step:200/20000 val_loss:2.7506 val_bpb:1.6290 train_time:76768ms step_avg:383.84ms
+step:300/20000 train_loss:2.5718 train_time:115072ms step_avg:383.57ms
+step:400/20000 train_loss:2.3552 train_time:153193ms step_avg:382.98ms
+step:400/20000 val_loss:2.5176 val_bpb:1.4910 train_time:153194ms step_avg:382.99ms
+step:500/20000 train_loss:2.4613 train_time:191136ms step_avg:382.27ms
+step:600/20000 train_loss:2.4514 train_time:229297ms step_avg:382.16ms
+step:600/20000 val_loss:2.4048 val_bpb:1.4243 train_time:229298ms step_avg:382.16ms
+step:700/20000 train_loss:2.4056 train_time:267277ms step_avg:381.82ms
+step:800/20000 train_loss:2.2977 train_time:305220ms step_avg:381.53ms
+step:800/20000 val_loss:2.3273 val_bpb:1.3784 train_time:305221ms step_avg:381.53ms
+step:900/20000 train_loss:2.3137 train_time:343139ms step_avg:381.27ms
+step:1000/20000 train_loss:2.3059 train_time:381076ms step_avg:381.08ms
+step:1000/20000 val_loss:2.2737 val_bpb:1.3466 train_time:381078ms step_avg:381.08ms
+step:1100/20000 train_loss:2.2186 train_time:418972ms step_avg:380.88ms
+step:1200/20000 train_loss:2.2241 train_time:456845ms step_avg:380.70ms
+step:1200/20000 val_loss:2.2330 val_bpb:1.3225 train_time:456846ms step_avg:380.71ms
+step:1300/20000 train_loss:2.2352 train_time:494863ms step_avg:380.66ms
+step:1400/20000 train_loss:2.2483 train_time:532983ms step_avg:380.70ms
+step:1400/20000 val_loss:2.2013 val_bpb:1.3037 train_time:532984ms step_avg:380.70ms
+step:1500/20000 train_loss:2.2052 train_time:570991ms step_avg:380.66ms
+step:1577/20000 val_loss:2.1832 val_bpb:1.2930 train_time:600198ms step_avg:380.60ms
+stopping_early: wallclock_cap train_time:600198ms step:1577/20000
+peak memory allocated: 13984 MiB reserved: 14026 MiB
+Serialized model: 100742755 bytes
+Code size: 64378 bytes
+Total submission size: 100807133 bytes
+Serialized model int8+zlib: 19887120 bytes (payload:25555104 raw_torch:25576974 payload_ratio:3.94x)
+Total submission size int8+zlib: 19951498 bytes
+final_int8_zlib_roundtrip val_loss:2.1851 val_bpb:1.2942 eval_time:13807ms
+final_int8_zlib_roundtrip_exact val_loss:2.18513460 val_bpb:1.29415979
+gptq:generating autoregressive calibration data (64 seqs x 1024 tokens, temp=0.8)...
+gptq:generated 64 sequences in 44.6s
+gptq:collecting hessians from autoregressive data...
+gptq:collected hessians for 30 layers
+selective_prune: 5390606 ±1 candidates, unpruned=13.04MB target=15.9MB
+selective_prune: already fits, no pruning needed
+Serialized model int6+lzma: 13604172 bytes
+Total submission size int6+lzma: 13668550 bytes
+final_int6_roundtrip val_loss:2.1953 val_bpb:1.3002 eval_time:15483ms
+final_int6_roundtrip_exact val_loss:2.19532493 val_bpb:1.30019508
