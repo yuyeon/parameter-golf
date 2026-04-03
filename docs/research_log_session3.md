@@ -69,8 +69,43 @@ This is speculative but the 1×H100 signal strongly favors FiLM.
 - **SwiGLU MLP**: 3 weight matrices vs 2 for same hidden dim = worse param efficiency at 8×MLP. Skip.
 - **LeakyReLU² for FiLM**: Already killed (compile overhead costs 50% more ms/step).
 
-## Experiment Queue (after SOTA baseline completes)
-1. FiLM 5→7+8xMLP with int6 (600s) — confirm artifact fits 16MB
-2. FiLM + FA3 + Partial RoPE 5→7+8xMLP (200 steps) — compare ms/step and BPP vs baseline FiLM
-3. FiLM + Differential Attention 5→7+8xMLP (200 steps) — novel mechanism screen
-4. If FA3/DiffAttn help: full 600s runs with int6
+## Completed Experiments (Session 3)
+
+### 1×H100 head-to-head (600s, pre-quant BPB)
+| Model | Steps | ms/step | Pre-quant | Int6 post-quant | Artifact |
+|-------|-------|---------|-----------|-----------------|----------|
+| #1 submission (clean) | 894 | 671 | 1.3813 | 1.9091 (broken) | 7.5MB |
+| FiLM SDPA | 1577 | 381 | 1.2930 | 1.3002 | 13.7MB |
+| **FiLM FA3+EMA+QAT** | **1718** | **349** | **1.2863** | **1.3010** | **13.8MB** |
+
+### 200-step screening results
+| Config | BPB@200 | ms/step | Verdict |
+|--------|---------|---------|---------|
+| FiLM FA3 seq1024 524K (baseline) | 1.6196 | 353 | **BEST on 1 GPU** |
+| FiLM FA3 seq2048 524K | 1.6049 | 374 | marginal on 1 GPU, promising for 8×H100 |
+| FiLM FA3 seq2048 786K | 1.5921 | 551 | best per-step, too slow on 1 GPU |
+| FiLM Partial RoPE 16/64 | 1.6381 | 359 | **KILL** — hurts FiLM |
+| FiLM Differential Attention | 1.6594 | 477 | **KILL** — +0.040 worse, 35% slower |
+
+### Previously tried (from experiment log)
+- FiLM 5→7+10xMLP: 1.6257 BPB, 429ms, 16.8MB — marginal vs 8x, exceeded 16MB with int8 (might fit int6)
+- FiLM 3→7+12xMLP: 1.6444 BPB — KILLED (too few unique blocks)
+
+### Not yet tried
+- FiLM 5→7+9xMLP (wider MLP, between 8x and 10x)
+- FiLM 4→7 or 6→7 (different shared/unique block ratios)
+- Warmdown tuning (SOTA uses 3500 vs our 1200)
+- Optimizer hyperparameter tuning (matrix_lr, muon_momentum, etc.)
+
+### Key observations
+- MuonEq-R already in film_fa3 (inherited from earlier work)
+- Partial RoPE hurts FiLM (shared blocks need full position info)
+- Differential Attention killed (FA3 at head_dim=32 too slow)
+- EMA doesn't help on 1 GPU (not enough steps), expected to help on 8×H100
+- Late QAT triggered at step 1538 on 1 GPU
+
+### Recommended 8×H100 submission
+```bash
+NUM_SHARED_BLOCKS=5 NUM_LAYERS=7 MLP_MULT=8 USE_INT6=1 TRAIN_SEQ_LEN=2048 \
+  torchrun --nproc_per_node=8 experiments/film_fa3/train_gpt.py
+```
