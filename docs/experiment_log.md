@@ -153,3 +153,4 @@ Full-budget run in progress.
 - **Best 200-step result**: 1.6077 BPB (Kitchen Sink + BigramHash + WD)
 - **Best 500-step result**: 1.4200 BPB (Kitchen Sink + BigramHash)
 - **Single most impactful change**: MuonEq-R (-0.024 avg, 3 lines, zero overhead)
+XSA is incompatible with FiLM weight sharing: 1.6547 vs 1.6353 without XSA
