@@ -582,6 +582,16 @@ class CausalSelfAttention(nn.Module):
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.head_dim, base=rope_base)
+        self.use_xsa = False
+
+    def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
+        B, T, H, D = y.shape
+        Hkv = v.size(2)
+        group = H // Hkv
+        y_g = y.reshape(B, T, Hkv, group, D)
+        vn = F.normalize(v, dim=-1).unsqueeze(3)
+        proj = (y_g * vn).sum(dim=-1, keepdim=True) * vn
+        return (y_g - proj).reshape(B, T, H, D)
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -602,6 +612,11 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
+        if self.use_xsa:
+            y_bthd = y.transpose(1, 2)
+            v_bthd = v.transpose(1, 2)
+            y_bthd = self._xsa_efficient(y_bthd, v_bthd)
+            y = y_bthd.transpose(1, 2)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -721,6 +736,12 @@ class GPT(nn.Module):
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
             self.lm_head._zero_init = True
+        # Enable XSA on all attention layers
+        xsa_n = int(os.environ.get("XSA_LAST_N", 0))
+        if xsa_n > 0:
+            for i in range(max(0, effective_depth - xsa_n), effective_depth):
+                bi = self.block_schedule[i]
+                self.blocks[bi].attn.use_xsa = True
         self._init_weights()
 
     def _init_weights(self) -> None:
