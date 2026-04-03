@@ -714,20 +714,14 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
-        # Linear stochastic depth: drop rate increases with depth (0 at first layer, max at last)
-        max_drop = float(os.environ.get("STOCH_DEPTH_RATE", "0.0"))
-        num_layers = self.num_encoder_layers + self.num_decoder_layers
 
         for i in range(self.num_encoder_layers):
-            dr = max_drop * (i / max(num_layers - 1, 1)) if self.training else 0.0
-            x = self.blocks[i](x, x0, drop_rate=dr)
+            x = self.blocks[i](x, x0)
             skips.append(x)
         for i in range(self.num_decoder_layers):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            layer_idx = self.num_encoder_layers + i
-            dr = max_drop * (layer_idx / max(num_layers - 1, 1)) if self.training else 0.0
-            x = self.blocks[layer_idx](x, x0, drop_rate=dr)
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
