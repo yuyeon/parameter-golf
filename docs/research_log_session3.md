@@ -104,8 +104,26 @@ This is speculative but the 1×H100 signal strongly favors FiLM.
 - EMA doesn't help on 1 GPU (not enough steps), expected to help on 8×H100
 - Late QAT triggered at step 1538 on 1 GPU
 
+### Session 3 novel experiments killed (5 total)
+1. Partial RoPE: -0.019 BPP worse (shared blocks need full position info)
+2. Differential Attention: +0.040 BPP worse, 35% slower (FA3 at head_dim=32 inefficient)
+3. Seq-len curriculum: torch.compile dynamic=True 40s overhead; MLP-bound arch gains little
+4. Cross-layer KV sharing: +0.100 BPP worse (destroys layer specialization)
+5. Factored MLP: +0.008 BPP worse, 4% slower (deeper nonlinearity doesn't help vs wide relu²)
+
+### Competition landscape update (2026-04-03)
+SLOT (Scored-position Learnable Optimization at Test-time) is the new paradigm:
+- PR #1313: 0.8637 BPB (SLOT-24, stride=96) — best pending
+- PR #1229: 0.9300 BPB (SLOT-16, stride=64)
+- Merged #1: 1.1147 BPB (no SLOT)
+
+SLOT is test-time only: optimizes per-sample delta + logit_bias on frozen hidden states.
+Architecture-agnostic. ~0.25 BPP gain. Implemented for FiLM in experiments/film_slot/.
+
+Running: SLOT24 (PR #1313) baseline on 1×H100 for comparison.
+
 ### Recommended 8×H100 submission
 ```bash
-NUM_SHARED_BLOCKS=5 NUM_LAYERS=7 MLP_MULT=8 USE_INT6=1 TRAIN_SEQ_LEN=2048 \
-  torchrun --nproc_per_node=8 experiments/film_fa3/train_gpt.py
+NUM_SHARED_BLOCKS=5 NUM_LAYERS=7 MLP_MULT=8 USE_INT6=1 TRAIN_SEQ_LEN=2048 SLOT_ENABLED=1 \
+  torchrun --nproc_per_node=8 experiments/film_slot/train_gpt.py
 ```
