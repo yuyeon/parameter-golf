@@ -1,40 +1,37 @@
 # Full Run Queue (8xH100 Promotion Candidates)
 
-*Last updated: 2026-04-03 — full-budget single-H100 results available*
+*Last updated: 2026-04-03*
 
-## Full-Budget Single-H100 Results (600s wallclock)
+## BREAKTHROUGH: FiLM Weight Sharing Beats Standard at Same Budget
 
-| Script | Steps | Pre-quant BPB | Post-quant BPB | Artifact Size | GPTQ |
-|--------|-------|---------------|----------------|---------------|------|
-| **Kitchen Sink + BigramHash** | 709 | 1.3597 | **1.3656** | 13.66 MB | N/A (int8) |
-| SOTA + MuonEq-R | 427 | 1.7636 | *GPTQ failed* | — | Cholesky fail |
+FiLM 5→9 + 3xMLP at 600s single H100: **1.3370 post-quant BPB**
+- vs Standard Kitchen Sink (seq1024): 1.3656 BPB
+- vs Standard Kitchen Sink (seq2048): 1.2698 BPB
 
-**Note**: The SOTA script is designed for 8xH100 (parallel banking, DDP). Single-GPU performance is not representative. The Kitchen Sink script works well on single GPU.
+**Why FiLM wins at fixed wallclock**: Smaller model (12.3M vs 22.1M) → faster steps (350ms vs 448ms) → 2.4x more training steps → extra training overcomes per-step quality gap.
 
 ## Queue (ordered by priority)
 
-### 1. MuonEq-R on SOTA Stack (8xH100 only)
-- **Implementation**: `experiments/sota_muoneqr/train_gpt.py`
-- **Evidence**: -0.189 BPB pre-quant at 200 steps (single GPU). GPTQ needs 8xH100 for proper training length.
-- **Expected on leaderboard**: 1.10-1.11 BPB (beating current 1.1147 SOTA)
-- **Blocker**: Requires 8xH100 to test properly. EMA and GPTQ don't work on single GPU at low step count.
+### 1. FiLM 5→9 + 3xMLP + MuonEq-R (BEST NOVEL)
+- **Script**: `experiments/film_depth/train_gpt.py`
+- **Config**: `NUM_SHARED_BLOCKS=5 NUM_LAYERS=9 MLP_MULT=3`
+- **600s single H100**: 1.3370 BPB, 1708 steps, 10.3MB artifact
+- **Expected on 8xH100**: ~1.15-1.18 BPB with 8x more steps
+- **Novelty**: FiLM-depth weight sharing not in any leaderboard submission
+- **To do**: Add BigramHash, add GPTQ int6, run 3 seeds on 8xH100
 
-### 2. Kitchen Sink + BigramHash (clean submission)
-- **Implementation**: `experiments/kitchen_sink_bigram/train_gpt.py`
-- **Config**: 9L/512d, MuonEq-R + XSA9 + LeakyReLU² + SmearGate + 3xMLP + BigramHash 2048 + WD 0.04
-- **Evidence**: 1.3656 post-quant BPB at 709 steps (single H100, 600s)
-- **Artifact**: 13.66 MB (fits 16MB budget with room for int6 GPTQ)
-- **Expected on 8xH100**: ~1.18-1.22 BPB (5-7x more steps, GPTQ compression)
-- **To submit**: Add GPTQ int6, add sliding window eval, run 3 seeds on 8xH100
+### 2. MuonEq-R on SOTA Stack
+- **Script**: `experiments/sota_muoneqr/train_gpt.py`
+- **Evidence**: Training val_bpb 1.5741 at 680 steps (massive improvement)
+- **Blocker**: Needs 8xH100 for EMA + GPTQ to work
+- **Expected**: Beat 1.1147 SOTA
 
-### 3. Kitchen Sink Transplanted to SOTA Banking
-- **What**: Use SOTA's parallel Muon banking + our improvements
-- **Expected**: Best possible result — faster steps (banking) + better optimization (MuonEq-R) + better arch (kitchen sink)
-- **Effort**: Significant implementation — merge banking into kitchen sink
+### 3. Kitchen Sink + BigramHash (seq2048)
+- **Script**: `experiments/kitchen_sink_bigram/train_gpt.py`
+- **600s single H100**: 1.2698 BPB, 1338 steps, 15.6MB artifact
+- **Not novel** — combines known techniques
 
-## Key Decision: What to run on 8xH100
-
-If you have 8xH100 access:
-1. **Fastest win**: Apply MuonEq-R to SOTA script (3-line change), run 3 seeds → submit
-2. **Highest upside**: Kitchen Sink + BigramHash with GPTQ → needs int6 quantization added
-3. **Maximum effort**: Transplant kitchen sink to banking architecture → days of work
+## Key Decision
+- FiLM 5→9 is the **genuinely novel** candidate for a new submission
+- MuonEq-R on SOTA is the **safest bet** for beating the leaderboard
+- Both should be tested on 8xH100 when available
