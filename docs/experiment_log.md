@@ -165,3 +165,18 @@ FiLM 5→9 + 4xMLP 600s: 1.3320 BPB, 1420 steps, 12.1MB — NEW BEST NOVEL
 Learned RoPE: 1.7702 BPB — KILL (compile overhead from recomputing cos/sin)
 FiLM 5→9 + 5xMLP 600s: 1.3179 BPB, 1507 steps, 13.9MB — NEW BEST NOVEL
 FiLM 5→9 + 6xMLP 600s: 1.3141 BPB, 1398 steps, 15.5MB — NEW BEST NOVEL
+
+## Round 4: Post-FiLM Novel Ideas (H100 Session 2)
+
+SMoE 4×2x on FiLM 5→9: 1.6331 BPB, 579ms — KILL (single 8xMLP beats it: 1.6279, 483ms)
+  Root cause: expert specialization useless at dim=512 scale. Compression penalty too.
+AFB (attn-free blocks 0,1) on FiLM 5→9+3xMLP: 1.6987 BPB, 277ms — KILL
+  21% faster but 0.063 BPB worse. At competitive MLP widths, attention only 25% of compute.
+Palindrome schedule [0,1,2,3,4,3,2,1,0]: 1.6439 BPB, 340ms — KILL (default cyclic is optimal)
+Contextual conv embedding (k=5): 1.6477 BPB, 351ms — KILL (redundant with first attention layer)
+Auxiliary mid-layer loss (α=0.1): 1.8042 BPB, 344ms — KILL (gradient interference with MuonEq-R)
+FiLM 1→9 + 30x MLP (extreme sharing): 2.4936 post-quant BPB, 1124ms — KILL
+  Single block can't differentiate across 9 layers. Massive MLP = quantization-unfriendly.
+
+Key insight: FiLM is at a local optimum. Incremental modifications on familiar axes all fail.
+Next direction: completely novel architecture (gated convolutions, linear recurrence).
