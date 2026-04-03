@@ -164,3 +164,4 @@ LowRank r=64: 2.0634 BPB, 719ms/step — KILL
 FiLM 5→9 + 4xMLP 600s: 1.3320 BPB, 1420 steps, 12.1MB — NEW BEST NOVEL
 Learned RoPE: 1.7702 BPB — KILL (compile overhead from recomputing cos/sin)
 FiLM 5→9 + 5xMLP 600s: 1.3179 BPB, 1507 steps, 13.9MB — NEW BEST NOVEL
+FiLM 5→9 + 6xMLP 600s: 1.3141 BPB, 1398 steps, 15.5MB — NEW BEST NOVEL
