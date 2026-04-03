@@ -1,140 +1,155 @@
 # Experiment Log
 
-*Chronological record of all experiments*
+*Chronological record of all experiments — 2026-04-03*
 
-## 2026-04-03: Session Start
-
-### Environment
+## Environment
 - GPU: NVIDIA H100 80GB HBM3
 - CUDA: 12.8, Driver 580.126.09
-- PyTorch: 2.11.0+cu128
-- Flash Attention 3: 3.0.0
-
-### Orientation Complete
-- Read full repo, README, leaderboard, top 10 submissions, 30+ PRs
-- Identified current SOTA: 1.1147 BPB (merged), 1.0924 BPB (unmerged PR #1279)
-- Built landscape_map.md with 15 ideas
+- PyTorch: 2.11.0+cu128, Flash Attention 3: 3.0.0
+- All experiments: single H100, post-int8-quant BPB on FineWeb validation
 
 ---
 
-## Control Baselines (200 steps)
+## Controls (200 steps)
 
-### CTRL-1: Naive Baseline
-- **Script**: `train_gpt.py` (unmodified)
-- **Config**: 9L/512d/8H/4KV, ReLU², 2x MLP, seq_len=1024
-- **Seed 42**: val_bpb 1.6505 pre-quant, **1.6541 post-quant**, 330ms/step
-- **Seed 1337**: val_bpb 1.6568 pre-quant, **1.6596 post-quant**, 330ms/step
-- **VRAM**: 10,940 MiB
-- **Artifact**: 10.9 MB
-
-### CTRL-2: SOTA Stack (2026-03-25)
-- **Script**: `records/track_10min_16mb/2026-03-25.../train_gpt.py`
-- **Config**: 11L/512d/8H/4KV, LeakyReLU², 3x MLP, BigramHash 3072, XSA-all, banking
-- **Seed 42**: val_bpb 1.9295 pre-quant, GPTQ failed (Cholesky on undertrained model)
-- **Step time**: 669 ms/step (2x baseline)
-- **Note**: GPTQ requires longer training for meaningful calibration
-
-### CTRL-3: Depth Recurrence
-- **Script**: `records/track_non_record_16mb/2026-03-21.../train_gpt.py`
-- **Config**: 3 unique blocks, 9 effective depth, LoRA rank 4
-- **Seed 42**: val_bpb 1.8114 pre-quant, **1.8151 post-quant**, 546ms/step
-- **Artifact**: 4.3 MB (massive headroom — 11.7 MB unused)
-- **Note**: Step time degrades from ~380ms to ~546ms over training (torch.compile issue with cycled blocks)
+| ID | Script | Config | Seed 42 BPB | Seed 1337 BPB | ms/step |
+|----|--------|--------|-------------|---------------|---------|
+| C1 | train_gpt.py | 9L/512d/8H/4KV, ReLU², 2x MLP | 1.6541 | 1.6596 | 330 |
+| C2 | SOTA (2026-03-25) | 11L, banking, XSA-all, BigramHash3072 | *(GPTQ failed)* | — | 669 |
+| C3 | Depth Recurrence | 3 unique blocks, 9 eff depth, LoRA r=4 | 1.8151 | — | 546 |
 
 ---
 
-## Experiment 1: Asymmetric U-Net Split
+## Round 1: Basic Ideas
 
-### Exp 1a: Various encoder/decoder splits
-- **Script**: `experiments/asymmetric_split/train_gpt.py`
-- **Diff**: Single env var `NUM_ENCODER_LAYERS` controls split
-- **Novelty claim**: Standard 50/50 split is cargo-culted from vision. PR #1275 found decoder-heavy splits help.
+### Exp 1: Asymmetric U-Net Split
+**Script**: `experiments/asymmetric_split/train_gpt.py`
 
-| Split | val_bpb | post-quant | ms/step | Delta |
-|-------|---------|------------|---------|-------|
-| 4/5 (default) | 1.6505 | 1.6541 | 330 | — |
-| 3/6 | 1.6517 | 1.6540 | 329 | -0.0001 |
-| 2/7 | 1.6520 | 1.6543 | 328 | +0.0002 |
-| 1/8 | 1.6726 | 1.6824 | 571 | +0.028 |
+| Split | BPB | ms/step | Verdict |
+|-------|-----|---------|---------|
+| 4/5 (default) | 1.6541 | 330 | control |
+| 3/6 | 1.6540 | 329 | noise |
+| 2/7 | 1.6543 | 328 | noise |
+| 1/8 | 1.6824 | 571 | **KILL** |
 
-**Verdict: KILL** — No effect at 9 layers. 1/8 split is degenerate (step time doubles). PR #1275's result may only apply at higher depth.
+### Exp 2: Multi-Token Prediction (MTP)
+**Script**: `experiments/mtp/train_gpt.py`
 
----
+| Config | BPB | ms/step | Verdict |
+|--------|-----|---------|---------|
+| k=2 w=0.15 | 1.6514 | 339 | small |
+| k=2 w=0.30 | 1.6516 | 340 | small |
+| k=3 w=0.15 | 1.6512 | 339 | small |
 
-## Experiment 2: Multi-Token Prediction (MTP)
+**KILL** — doesn't compose with MuonEq-R.
 
-### Exp 2a-c: Various MTP configs
-- **Script**: `experiments/mtp/train_gpt.py`
-- **Diff**: Added `mtp_head` CastedLinear at mid-layer, predicts token+k during training, discarded at eval
-- **Novelty claim**: MTP (DeepSeek-V3 style) not attempted in parameter-golf
+### Exp 3: MuonEq-R
+**Script**: `experiments/muoneqr/train_gpt.py` | **Diff**: 3 lines in Muon.step()
 
-| Config | val_bpb | post-quant | ms/step | Delta |
-|--------|---------|------------|---------|-------|
-| k=2 w=0.15 | 1.6490 | 1.6514 | 339 | -0.003 |
-| k=2 w=0.30 | 1.6504 | 1.6516 | 340 | -0.003 |
-| k=3 w=0.15 | 1.6488 | 1.6512 | 339 | -0.003 |
-
-**Verdict: HOLD (alone), KILL (with MuonEq-R)** — Small consistent improvement alone, but interferes with MuonEq-R.
-
----
-
-## Experiment 3: MuonEq-R (Row-Normalized Gradient)
-
-- **Script**: `experiments/muoneqr/train_gpt.py`
-- **Diff**: 3 lines in Muon.step() — `row_norms = g.norm(dim=-1, keepdim=True).clamp(min=1e-8); g = g / row_norms` before Newton-Schulz
-- **Novelty claim**: MuonEq-R from PR #1279, isolated on baseline
-
-| Seed | Baseline post-q | MuonEq-R post-q | Delta |
-|------|-----------------|-----------------|-------|
+| Seed | Baseline | MuonEq-R | Delta |
+|------|----------|----------|-------|
 | 42 | 1.6541 | **1.6376** | **-0.0165** |
 | 1337 | 1.6596 | **1.6287** | **-0.0309** |
 
-**Verdict: PROMOTE** — Largest single improvement found. Zero overhead. Robust across seeds.
+**PROMOTE** — largest single improvement.
+
+### Exp 4: MuonEq-R + MTP
+| Seed | MuonEq-R | +MTP | Delta |
+|------|----------|------|-------|
+| 42 | 1.6376 | 1.6409 | +0.003 worse |
+| 1337 | 1.6287 | 1.6442 | +0.016 worse |
+
+**KILL** — interference.
+
+### Exp 5: MuonEq-R + XSA
+**Script**: `experiments/muoneqr_xsa/train_gpt.py`
+
+| Config | BPB | ms/step |
+|--------|-----|---------|
+| +XSA4 | 1.6368 | 341 |
+| +XSA9 | **1.6357** | 351 |
+
+**PROMOTE** — composes with MuonEq-R.
+
+### Exp 6: Hybrid Conv-Attention
+**Script**: `experiments/linear_mixer/train_gpt.py`, `experiments/hybrid_mixer_xsa/train_gpt.py`
+
+| Config | BPB | ms/step |
+|--------|-----|---------|
+| 2 conv + 7 attn | 1.6360 | **319** (fastest) |
+| 2 conv + 7 attn + XSA | 1.6407 | 332 |
+
+**SALVAGE** — fast but XSA doesn't compose on fewer attention layers.
 
 ---
 
-## Experiment 4: MuonEq-R + MTP Combined
+## Round 2: Stacking Improvements
 
-- **Script**: `experiments/combined/train_gpt_muoneqr_mtp.py`
+### Exp 7: MuonEq-R + LeakyReLU²
+**Script**: `experiments/muoneqr_leakyrelu2/train_gpt.py`
+**Result**: **1.6245** BPB, 333ms/step. **-0.013 vs MuonEq-R alone. PROMOTE.**
 
-| Seed | MuonEq-R only | MuonEq-R + MTP | Delta |
-|------|---------------|----------------|-------|
-| 42 | 1.6376 | 1.6409 | +0.003 (worse) |
-| 1337 | 1.6287 | 1.6442 | +0.016 (worse) |
+### Exp 8: MuonEq-R + SmearGate
+**Script**: `experiments/muoneqr_smeargate/train_gpt.py`
+**Result**: 1.6566 BPB. **Worse** alone. Context-dependent — helps in kitchen sink.
 
-**Verdict: KILL MTP** — Auxiliary loss interferes with MuonEq-R's gradient dynamics.
+### Exp 9: Kitchen Sink 3x (MuonEq-R + XSA9 + LeakyReLU² + SmearGate + 3x MLP)
+**Script**: `experiments/kitchen_sink/train_gpt.py`
 
----
+| Seed | BPB | ms/step | Params |
+|------|-----|---------|--------|
+| 42 | **1.6159** | 385 | 21.8M |
+| 1337 | **1.6143** | 386 | 21.8M |
 
-## Experiment 5: MuonEq-R + XSA
+**PROMOTE** — best combined stack on baseline architecture.
 
-- **Script**: `experiments/muoneqr_xsa/train_gpt.py`
-- **Diff**: Added XSA (subtract self-value projection) to attention layers
+### Exp 10: Kitchen Sink 2x (with SmearGate)
+**Result**: 1.6356 BPB. SmearGate needs 3x MLP to be useful.
 
-| Config | post-quant BPB | ms/step | Delta vs MuonEq-R |
-|--------|---------------|---------|-------------------|
-| MuonEq-R | 1.6376 | 333 | — |
-| + XSA last 4 | 1.6368 | 341 | -0.0008 |
-| + XSA all 9 | **1.6357** | 351 | **-0.0019** |
+### Exp 11: Dynamic Depth Gating
+**Script**: `experiments/dynamic_depth/train_gpt.py`
+**Result**: **1.6325** BPB, 353ms/step. -0.005 vs MuonEq-R, but +20ms overhead.
+**SALVAGE** — promising but overhead needs reduction.
 
-**Verdict: PROMOTE** — XSA composes with MuonEq-R. XSA-all > XSA-4.
-
----
-
-## Experiment 6: Hybrid Conv-Attention + MuonEq-R
-
-- **Script**: `experiments/linear_mixer/train_gpt.py` (conv only), `experiments/hybrid_mixer_xsa/train_gpt.py` (conv + XSA)
-- **Diff**: CausalConvMixer replaces first N attention layers with depthwise causal conv + gate
-
-| Config | post-quant BPB | ms/step | Delta vs MuonEq-R |
-|--------|---------------|---------|-------------------|
-| MuonEq-R | 1.6376 | 333 | — |
-| + 2 Conv | 1.6360 | **319** | -0.0016, **14ms faster** |
-| + 2 Conv + XSA7 | 1.6407 | 332 | +0.003 |
-
-**Verdict: SALVAGE** — Conv layers are faster but adding XSA to the remaining attention layers doesn't compose well (XSA-on-fewer-layers loses the benefit). Worth trying 1 conv + 8 attn + XSA-all.
+### Exp 12: MuonEq-R on SOTA Stack
+**Script**: `experiments/sota_muoneqr/train_gpt.py`
+**Result**: **1.7401 pre-quant** (GPTQ failed). -0.189 vs SOTA baseline (1.9295). Massive effect.
+**PROMOTE** — highest priority for full run.
 
 ---
 
-## Pending: Longer MuonEq-R Run (500 steps)
-Running in background. Will validate that the improvement holds at higher step counts.
+## Round 3: BigramHash + Validation
+
+### Exp 13: Kitchen Sink + BigramHash 2048
+**Script**: `experiments/kitchen_sink_bigram/train_gpt.py`
+**Result**: **1.6085** BPB, 387ms/step, 22.1M params. **PROMOTE.**
+
+### Exp 14: Kitchen Sink + BigramHash + Muon WD=0.04
+**Result**: **1.6077** BPB. Marginal additional improvement.
+
+### Exp 15: Kitchen Sink + BigramHash + 11 Layers
+**Result**: 1.7120 BPB, **989ms/step**. **KILL** — 11L without banking is too slow.
+
+### Exp 16: Kitchen Sink + BigramHash @ 500 steps
+**Result**: **1.4200** BPB. Strong validation of the stack at longer training.
+
+### Exp 17: MuonEq-R @ 500 steps
+**Result**: 1.4687 BPB. Improvement holds: -0.015 vs baseline (1.4834).
+
+### Exp 18: SOTA + MuonEq-R @ 600s (running)
+Full-budget run in progress.
+
+### Exp 19: Kitchen Sink + BigramHash @ 600s (running)
+Full-budget run in progress.
+
+---
+
+## Summary Statistics
+
+- Total experiments: 19 (18 complete, 2 running)
+- **Promoted**: 5 ideas (MuonEq-R, LeakyReLU², XSA, Kitchen Sink, BigramHash)
+- **Killed**: 4 ideas (asymmetric split, MTP, 11L without banking, SmearGate alone)
+- **Salvaged**: 2 ideas (conv mixer, dynamic depth)
+- **Best 200-step result**: 1.6077 BPB (Kitchen Sink + BigramHash + WD)
+- **Best 500-step result**: 1.4200 BPB (Kitchen Sink + BigramHash)
+- **Single most impactful change**: MuonEq-R (-0.024 avg, 3 lines, zero overhead)
