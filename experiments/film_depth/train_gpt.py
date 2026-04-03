@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import glob
 import io
+import lzma
 import math
 import os
 import random
@@ -426,7 +427,207 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 
 
 # -----------------------------
-# DATA LOADING 
+# GPTQ-LITE INT6 QUANTIZATION
+# -----------------------------
+
+def _classify_param(name: str) -> str:
+    if "tok_emb" in name or "lm_head" in name:
+        return "embed"
+    if ".mlp." in name:
+        return "mlp"
+    if ".attn." in name or (".proj." in name and ".mlp." not in name):
+        return "attn"
+    return "other"
+
+def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
+    t32 = t.float()
+    if t32.ndim == 2:
+        best_q, best_s, best_err = None, None, float('inf')
+        for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            row_clip = torch.quantile(t32.abs(), pct, dim=1) if pct < 1.0 else t32.abs().amax(dim=1)
+            s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
+            q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
+            err = (t32 - q.float() * s.float()[:, None]).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_s, best_err = q, s, err
+        return best_q, best_s
+    amax = t32.abs().max().item()
+    scale = torch.tensor(amax / clip_range if amax > 0 else 1.0, dtype=torch.float16)
+    return torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8), scale
+
+def _quantize_int6_percentile(t32, clip_range=31):
+    if t32.ndim == 2:
+        best_q, best_s, best_err = None, None, float('inf')
+        for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            row_clip = torch.quantile(t32.abs(), pct, dim=1) if pct < 1.0 else t32.abs().amax(dim=1)
+            s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
+            q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
+            err = (t32 - q.float() * s.float()[:, None]).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_s, best_err = q, s, err
+        return best_q, best_s
+    amax = t32.abs().max().item()
+    scale = torch.tensor(amax / clip_range if amax > 0 else 1.0, dtype=torch.float16)
+    return torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8), scale
+
+def quantize_int6_gptq(weight, hessian=None, clip_range=31, block_size=128):
+    t32 = weight.float()
+    if t32.ndim != 2 or hessian is None:
+        return _quantize_int6_percentile(t32, clip_range)
+    rows, cols = t32.shape
+    H = hessian.float().clone()
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1
+    damp = 0.01 * torch.mean(torch.diag(H))
+    H[torch.arange(cols), torch.arange(cols)] += damp
+    perm = torch.argsort(torch.diag(H), descending=True)
+    inv_perm = torch.argsort(perm)
+    W = t32[:, perm].clone()
+    W[:, dead[perm]] = 0
+    H = H[perm][:, perm]
+    for damp_mult in [1.0, 10.0, 100.0, 1000.0]:
+        try:
+            H_try = H.clone()
+            if damp_mult > 1.0:
+                H_try[torch.arange(H_try.shape[0]), torch.arange(H_try.shape[0])] += damp * damp_mult
+            Hinv = torch.linalg.cholesky(H_try)
+            Hinv = torch.cholesky_inverse(Hinv)
+            Hinv = torch.linalg.cholesky(Hinv, upper=True)
+            break
+        except torch._C._LinAlgError:
+            if damp_mult >= 1000.0:
+                return _quantize_int6_percentile(t32, clip_range)
+            continue
+    best_q, best_scale, best_err = None, None, float('inf')
+    for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+        row_clip = torch.quantile(t32.abs(), pct, dim=1) if pct < 1.0 else t32.abs().amax(dim=1)
+        s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
+        sf = s.float()
+        Q = torch.zeros_like(W, dtype=torch.int8)
+        W_work = W.clone()
+        for i1 in range(0, cols, block_size):
+            i2 = min(i1 + block_size, cols)
+            count = i2 - i1
+            W1 = W_work[:, i1:i2].clone()
+            Q1 = torch.zeros(rows, count, dtype=torch.int8)
+            Err1 = torch.zeros(rows, count)
+            Hinv1 = Hinv[i1:i2, i1:i2]
+            for i in range(count):
+                w = W1[:, i]
+                d = Hinv1[i, i]
+                q = torch.clamp(torch.round(w / sf), -clip_range, clip_range).to(torch.int8)
+                Q1[:, i] = q
+                err = (w - q.float() * sf) / d
+                W1[:, i:] -= err.unsqueeze(1) * Hinv1[i, i:].unsqueeze(0)
+                Err1[:, i] = err
+            Q[:, i1:i2] = Q1
+            if i2 < cols:
+                W_work[:, i2:] -= Err1 @ Hinv[i1:i2, i2:]
+        recon = Q.float() * sf[:, None]
+        mse = (W - recon).pow(2).mean().item()
+        if mse < best_err:
+            best_q, best_scale, best_err = Q, s, mse
+    best_q = best_q[:, inv_perm]
+    return best_q, best_scale
+
+def mixed_quantize_int6(state_dict, int6_cats, hessians=None):
+    result, meta = {}, {}
+    for name, tensor in state_dict.items():
+        t = tensor.detach().cpu().contiguous()
+        cat = _classify_param(name)
+        if not t.is_floating_point() or t.numel() <= 65536:
+            result[name] = t.to(torch.float16) if t.is_floating_point() else t
+            meta[name] = "passthrough"
+            continue
+        if any(p in name for p in CONTROL_TENSOR_NAME_PATTERNS):
+            result[name] = t.float()
+            meta[name] = "passthrough_ctrl"
+            continue
+        if cat in int6_cats and t.ndim >= 1:
+            H = hessians.get(name) if hessians else None
+            q, s = quantize_int6_gptq(t, hessian=H, clip_range=31) if H is not None else quantize_int6_per_row(t, clip_range=31)
+            result[name + ".q"], result[name + ".scale"] = q, s
+            meta[name] = {"type": "int6"}
+        else:
+            q, s = quantize_float_tensor(t)
+            result[name + ".q"], result[name + ".scale"] = q, s
+            meta[name] = {"type": "int8"}
+    return result, meta
+
+def dequantize_mixed_int6(result, meta, template_sd):
+    out = {}
+    for name, orig in template_sd.items():
+        info = meta.get(name)
+        if info is None:
+            continue
+        if info in ("passthrough", "passthrough_ctrl"):
+            t = result[name]
+            if t.dtype == torch.float16 and orig.dtype in (torch.float32, torch.bfloat16):
+                t = t.to(orig.dtype)
+            out[name] = t
+            continue
+        q, s = result[name + ".q"], result[name + ".scale"]
+        if s.ndim > 0:
+            out[name] = (q.float() * s.float().view(q.shape[0], *([1] * (q.ndim - 1)))).to(orig.dtype)
+        else:
+            out[name] = (q.float() * float(s.item())).to(orig.dtype)
+    return out
+
+def generate_autoregressive_calib(model, device, num_seqs=64, seq_len=1024,
+                                   vocab_size=1024, temperature=0.8, batch_size=8, seed=42):
+    model.eval()
+    rng = torch.Generator(device=device)
+    rng.manual_seed(seed)
+    all_tokens = []
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        for batch_start in range(0, num_seqs, batch_size):
+            bs = min(batch_size, num_seqs - batch_start)
+            tokens = torch.randint(0, vocab_size, (bs, 1), device=device, generator=rng)
+            for pos in range(seq_len - 1):
+                logits = model.forward_logits(tokens)
+                next_logit = logits[:, -1, :]
+                probs = torch.softmax(next_logit / temperature, dim=-1)
+                next_tok = torch.multinomial(probs, 1, generator=rng)
+                tokens = torch.cat([tokens, next_tok], dim=1)
+            for i in range(bs):
+                all_tokens.append(tokens[i:i+1])
+    return all_tokens
+
+def collect_hessians_from_tokens(hessian_model, token_seqs, device):
+    hessians = {}
+    hooks = []
+    for name, module in hessian_model.named_modules():
+        if isinstance(module, CastedLinear):
+            param_name = name + ".weight"
+            cols = module.weight.shape[1]
+            hessians[param_name] = torch.zeros(cols, cols, dtype=torch.float32, device='cpu')
+            def make_hook(pname):
+                def hook_fn(mod, inp, out):
+                    x = inp[0].detach().float()
+                    if x.ndim == 3:
+                        x = x.reshape(-1, x.shape[-1])
+                    hessians[pname] += (x.T @ x).cpu()
+                return hook_fn
+            hooks.append(module.register_forward_hook(make_hook(param_name)))
+    hessian_model.eval()
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        for seq in token_seqs:
+            x = seq[:, :-1].to(device)
+            y = seq[:, 1:].to(device)
+            hessian_model(x, y)
+    for h in hooks:
+        h.remove()
+    for name in hessians:
+        H = hessians[name]
+        H /= len(token_seqs)
+        damp = 0.01 * torch.diag(H).mean().clamp_min(1e-6)
+        H += damp * torch.eye(H.shape[0])
+        hessians[name] = H
+    return hessians
+
+
+# -----------------------------
+# DATA LOADING
 # -----------------------------
 
 def load_data_shard(file: Path) -> Tensor:
@@ -726,26 +927,34 @@ class GPT(nn.Module):
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def _encode(self, input_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
         skips: list[Tensor] = []
-
-        # Encoder: first half stores skips
         for i in range(self.num_encoder_layers):
             bi = self.block_schedule[i]
             x = self.blocks[bi](x, x0, self.film.attn_scales[i], self.film.mlp_scales[i], self.film.resid_mixes[i])
             skips.append(x)
-        # Decoder: second half reuses skips in reverse
         for i in range(self.num_decoder_layers):
             vi = self.num_encoder_layers + i
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             bi = self.block_schedule[vi]
             x = self.blocks[bi](x, x0, self.film.attn_scales[vi], self.film.mlp_scales[vi], self.film.resid_mixes[vi])
+        return self.final_norm(x)
 
-        x = self.final_norm(x).reshape(-1, x.size(-1))
+    def forward_logits(self, input_ids: Tensor) -> Tensor:
+        """Return logits (bsz, seq_len, vocab) without computing loss."""
+        x = self._encode(input_ids)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            logits_proj = self.lm_head(x)
+        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
+    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        x = self._encode(input_ids).reshape(-1, self.tok_emb.weight.size(1))
         targets = target_ids.reshape(-1)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
@@ -1150,6 +1359,114 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+
+    # -----------------------------
+    # INT6 + GPTQ QUANTIZATION (fits larger models in 16MB)
+    # -----------------------------
+
+    use_int6 = bool(int(os.environ.get("USE_INT6", "1")))
+    if use_int6:
+        # Reload pre-quant weights for int6
+        base_model.load_state_dict(torch.load("final_model.pt", map_location="cpu"), strict=True)
+        base_model.to(device)
+        export_sd = {k: v.detach().cpu() for k, v in base_model.state_dict().items()}
+
+        log0("gptq:generating autoregressive calibration data (64 seqs x 1024 tokens, temp=0.8)...")
+        t_gen = time.perf_counter()
+        ar_tokens = generate_autoregressive_calib(
+            base_model, device, num_seqs=64, seq_len=args.train_seq_len,
+            vocab_size=args.vocab_size, temperature=0.8, batch_size=8, seed=args.seed,
+        )
+        log0(f"gptq:generated {len(ar_tokens)} sequences in {time.perf_counter()-t_gen:.1f}s")
+
+        log0("gptq:collecting hessians from autoregressive data...")
+        hessians = collect_hessians_from_tokens(base_model, ar_tokens, device)
+        log0(f"gptq:collected hessians for {len(hessians)} layers")
+        del ar_tokens
+        torch.cuda.empty_cache()
+
+        quant_result, quant_meta = mixed_quantize_int6(export_sd, {"mlp", "attn"}, hessians=hessians)
+
+        # Selective ±1 pruning to fit target size
+        target_mb = float(os.environ.get("TARGET_MB", "15.9"))
+        code_bytes_est = len(code.encode("utf-8"))
+        ones_info = []
+        for name, info in quant_meta.items():
+            if not (isinstance(info, dict) and info.get("type") == "int6"):
+                continue
+            qk, sk = name + ".q", name + ".scale"
+            if qk not in quant_result or sk not in quant_result:
+                continue
+            q, s = quant_result[qk], quant_result[sk]
+            if s.ndim > 0:
+                ones_mask = (q.abs() == 1)
+                if ones_mask.any():
+                    row_idx = torch.arange(q.shape[0]).unsqueeze(1).expand_as(q)[ones_mask]
+                    flat_idx = torch.arange(q.numel()).reshape(q.shape)[ones_mask]
+                    errors = s.float()[row_idx].pow(2)
+                    for fi, err in zip(flat_idx.tolist(), errors.tolist()):
+                        ones_info.append((qk, fi, err))
+
+        if ones_info:
+            ones_info.sort(key=lambda x: x[2])
+            def _try_prune(n):
+                tmp = {k: v.clone() for k, v in quant_result.items()}
+                for i in range(min(n, len(ones_info))):
+                    tmp[ones_info[i][0]].view(-1)[ones_info[i][1]] = 0
+                buf = io.BytesIO()
+                torch.save({"w": tmp, "m": quant_meta}, buf)
+                return len(lzma.compress(buf.getvalue(), preset=9)) + code_bytes_est, tmp
+            no_sz, _ = _try_prune(0)
+            target_bytes = int(target_mb * 1024 * 1024)
+            log0(f"selective_prune: {len(ones_info)} ±1 candidates, unpruned={no_sz/(1024*1024):.2f}MB target={target_mb}MB")
+            if no_sz <= target_bytes:
+                log0("selective_prune: already fits, no pruning needed")
+            else:
+                full_sz, _ = _try_prune(len(ones_info))
+                log0(f"selective_prune: full ±1 prune={full_sz/(1024*1024):.2f}MB")
+                if full_sz > target_bytes:
+                    log0("selective_prune: even full prune not enough, applying all")
+                    _, quant_result = _try_prune(len(ones_info))
+                else:
+                    lo, hi = 0, len(ones_info)
+                    while lo < hi:
+                        mid = (lo + hi) // 2
+                        sz, _ = _try_prune(mid)
+                        if sz <= target_bytes:
+                            hi = mid
+                        else:
+                            lo = mid + 1
+                    log0(f"selective_prune: pruning {lo}/{len(ones_info)} ±1 values to fit {target_mb}MB")
+                    _, quant_result = _try_prune(lo)
+
+        quant_buf = io.BytesIO()
+        torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
+        quant_blob = lzma.compress(quant_buf.getvalue(), preset=9)
+        if master_process:
+            with open("final_model.int6.ptz", "wb") as f:
+                f.write(quant_blob)
+            quant_file_bytes = len(quant_blob)
+            code_bytes = len(code.encode("utf-8"))
+            log0(f"Serialized model int6+lzma: {quant_file_bytes} bytes")
+            log0(f"Total submission size int6+lzma: {quant_file_bytes + code_bytes} bytes")
+
+        # Roundtrip validation of int6 model
+        if distributed:
+            dist.barrier()
+        with open("final_model.int6.ptz", "rb") as f:
+            quant_blob_disk = f.read()
+        quant_state = torch.load(io.BytesIO(lzma.decompress(quant_blob_disk)), map_location="cpu")
+        deq_sd = dequantize_mixed_int6(quant_state["w"], quant_state["m"], export_sd)
+        base_model.load_state_dict(deq_sd, strict=True)
+        torch.cuda.synchronize()
+        t_qeval = time.perf_counter()
+        q_val_loss, q_val_bpb = eval_val(
+            args, model, rank, world_size, device, grad_accum_steps,
+            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        )
+        torch.cuda.synchronize()
+        log0(f"final_int6_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{1000.0*(time.perf_counter()-t_qeval):.0f}ms")
+        log0(f"final_int6_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
     if distributed:
         dist.destroy_process_group()
