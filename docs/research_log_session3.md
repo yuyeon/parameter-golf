@@ -119,6 +119,18 @@ SLOT (Scored-position Learnable Optimization at Test-time) is the new paradigm:
 
 SLOT is test-time only: optimizes per-sample delta + logit_bias on frozen hidden states.
 Architecture-agnostic. ~0.25 BPP gain. Implemented for FiLM in experiments/film_slot/.
+SLOT is competition-legal: score-first protocol, frozen model, torch.no_grad hidden states.
+
+### SLOT debugging (session 3)
+- FiLM+SLOT implementation works (39.6 GB VRAM, 100% GPU)
+- SLOT eval too slow on 1 GPU (~30 min for stride=64 on full val set)
+- #1313's SLOT eval failed on 1 GPU (double torch.compile issue)
+- Proper SLOT testing requires 8×H100
+
+### Vector quantization analysis (novel compression — KILLED)
+VQ with K=256 centroids on FiLM weights: 2064× worse MSE than int6.
+Only helps tall matrices (fc 4096×512: 7.9× ratio). Most weights are
+square or wide → codebook overhead kills compression. Int6+GPTQ is far superior.
 
 Running: SLOT24 (PR #1313) baseline on 1×H100 for comparison.
 
