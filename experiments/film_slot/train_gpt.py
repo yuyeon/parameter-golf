@@ -314,6 +314,8 @@ def eval_val_slot(
     else:
         proj_w = base_model.lm_head.weight.detach().float()
     softcap = base_model.logit_softcap
+    # Clear stale gradients to prevent torch.compile dtype mismatch
+    base_model.zero_grad(set_to_none=True)
     compiled_encode = torch.compile(base_model._encode, dynamic=False, fullgraph=False)
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
