@@ -83,6 +83,10 @@ class Hyperparameters:
     causal_slot = bool(int(os.environ.get("CAUSAL_SLOT", "0")))  # 1 = optimize on context-only (already-scored positions)
     eval_stride = int(os.environ.get("EVAL_STRIDE", 96))
     eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 0))  # 0 = use train_seq_len
+    # SLOT optimization mode: "v1" (original AdamW delta+bias), "logit_only" (AdamW bias only),
+    # "lbfgs" (L-BFGS delta+bias), "lbfgs_logit" (L-BFGS logit bias only)
+    slot_mode = os.environ.get("SLOT_MODE", "v1")
+    slot_lbfgs_history = int(os.environ.get("SLOT_LBFGS_HISTORY", 10))
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -359,26 +363,44 @@ def eval_val_slot(
             # Standard: optimize on same positions we score (includes future tokens)
             opt_mask = score_mask
             opt_valid = valid_count
-        delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=True)
+        use_delta = args.slot_mode in ("v1", "lbfgs")
+        use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit")
+        delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=use_delta)
         logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
-        slot_opt = torch.optim.AdamW([delta, logit_bias], lr=args.slot_lr, weight_decay=1e-8, eps=1e-5)
+        opt_params = [logit_bias] + ([delta] if use_delta else [])
         targets_flat = yb.reshape(-1)
         # Skip SLOT optimization if no context to optimize on (causal mode, first window)
         n_slot_steps = args.slot_steps if opt_valid > 0 else 0
-        for step_i in range(n_slot_steps):
-            lr_t = args.slot_lr_min + 0.5 * (args.slot_lr - args.slot_lr_min) * (1 + math.cos(math.pi * step_i / args.slot_steps))
-            for pg in slot_opt.param_groups:
-                pg['lr'] = lr_t
-            slot_opt.zero_grad()
-            h = hidden_f + delta
-            lp = F.linear(h, proj_w) + logit_bias
-            lg = softcap * torch.tanh(lp / softcap)
-            nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
-            slot_loss = (nll * opt_mask).sum() / opt_valid
-            slot_loss.backward()
-            slot_opt.step()
+        if use_lbfgs and n_slot_steps > 0:
+            slot_opt = torch.optim.LBFGS(opt_params, lr=args.slot_lr, max_iter=1,
+                                          history_size=args.slot_lbfgs_history, line_search_fn="strong_wolfe")
+            def lbfgs_closure():
+                slot_opt.zero_grad()
+                h = hidden_f + delta if use_delta else hidden_f
+                lp = F.linear(h, proj_w) + logit_bias
+                lg = softcap * torch.tanh(lp / softcap)
+                nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
+                loss = (nll * opt_mask).sum() / opt_valid
+                loss.backward()
+                return loss
+            for step_i in range(n_slot_steps):
+                slot_opt.step(lbfgs_closure)
+        elif n_slot_steps > 0:
+            slot_opt = torch.optim.AdamW(opt_params, lr=args.slot_lr, weight_decay=1e-8, eps=1e-5)
+            for step_i in range(n_slot_steps):
+                lr_t = args.slot_lr_min + 0.5 * (args.slot_lr - args.slot_lr_min) * (1 + math.cos(math.pi * step_i / args.slot_steps))
+                for pg in slot_opt.param_groups:
+                    pg['lr'] = lr_t
+                slot_opt.zero_grad()
+                h = hidden_f + delta if use_delta else hidden_f
+                lp = F.linear(h, proj_w) + logit_bias
+                lg = softcap * torch.tanh(lp / softcap)
+                nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
+                slot_loss = (nll * opt_mask).sum() / opt_valid
+                slot_loss.backward()
+                slot_opt.step()
         with torch.no_grad():
-            h = hidden_f + delta.detach()
+            h = (hidden_f + delta.detach()) if use_delta else hidden_f
             lp = F.linear(h, proj_w) + logit_bias.detach()
             lg = softcap * torch.tanh(lp / softcap)
             nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
@@ -1413,7 +1435,7 @@ def main() -> None:
 
         if args.slot_enabled:
             causal_label = "causal" if args.causal_slot else "standard"
-            log0(f"slot({causal_label}):starting steps={args.slot_steps} lr={args.slot_lr} stride={args.eval_stride}")
+            log0(f"slot({causal_label}):starting steps={args.slot_steps} lr={args.slot_lr} stride={args.eval_stride} mode={args.slot_mode}")
             t_slot = time.perf_counter()
             slot_val_loss, slot_val_bpb = eval_val_slot(
                 args, base_model, rank, world_size, device,
