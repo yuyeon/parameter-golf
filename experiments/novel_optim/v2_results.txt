@@ -1,0 +1,10 @@
+=== OPTIM_MODE=muoneqr ===
+step:200/200 train_loss:2.6918 train_time:70517ms step_avg:352.58ms
+step:200/200 val_loss:2.7355 val_bpb:1.6201 train_time:70517ms step_avg:352.59ms
+=== OPTIM_MODE=nsg ===
+step:200/200 train_loss:2.7092 train_time:72822ms step_avg:364.11ms
+step:200/200 val_loss:2.7494 val_bpb:1.6284 train_time:72822ms step_avg:364.11ms
+=== OPTIM_MODE=wip ===
+=== OPTIM_MODE=procrustes ===
+step:200/200 train_loss:30.8450 train_time:71898ms step_avg:359.49ms
+step:200/200 val_loss:30.8851 val_bpb:18.2919 train_time:71898ms step_avg:359.49ms
