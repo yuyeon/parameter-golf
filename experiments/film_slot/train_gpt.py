@@ -86,7 +86,13 @@ class Hyperparameters:
     # SLOT optimization mode: "v1" (original AdamW delta+bias), "logit_only" (AdamW bias only),
     # "lbfgs" (L-BFGS delta+bias), "lbfgs_logit" (L-BFGS logit bias only)
     slot_mode = os.environ.get("SLOT_MODE", "v1")
-    slot_lbfgs_history = int(os.environ.get("SLOT_LBFGS_HISTORY", 10))
+    slot_lbfgs_history = int(os.environ.get("SLOT_LBFGS_HISTORY", 20))
+    # Focal context: only use last N context tokens for causal SLOT loss (0 = all context)
+    slot_focal_ctx = int(os.environ.get("SLOT_FOCAL_CTX", 128))
+    # Clamp logit bias magnitude (0 = no clamp). PR #1350 uses 5.0.
+    slot_clamp = float(os.environ.get("SLOT_CLAMP", 5.0))
+    # Warm-start: carry mean logit bias between batches (causal SLOT only)
+    slot_warmstart = bool(int(os.environ.get("SLOT_WARMSTART", "1")))
 
     # Optimizer hyperparameters.
     embed_lr = float(os.environ.get("EMBED_LR", 0.6))
@@ -324,6 +330,8 @@ def eval_val_slot(
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_sum = torch.zeros((), device=device, dtype=torch.float64)
+    # Warm-start state: carry mean logit bias across batches
+    warmstart_bias = None
     base_model.eval()
     for bi in range(0, len(my_ws), args.slot_batch_seqs):
         bws = my_ws[bi:bi + args.slot_batch_seqs]
@@ -351,13 +359,16 @@ def eval_val_slot(
             continue
         # Optimization mask: what positions drive SLOT gradient
         if args.causal_slot:
-            # Causal: optimize only on already-scored context positions (0..wlen-stride)
+            # Causal: optimize only on already-scored context positions
+            # With focal_ctx > 0, focus on the LAST N context tokens (closest to new positions)
             opt_mask = torch.zeros(bsz, seq_s, device=device)
             for i, ws in enumerate(bws):
                 wlen = wlens[i]
                 ctx_end = max(wlen - stride, 0) if ws > 0 else 0
                 if ctx_end > 0:
-                    opt_mask[i, :ctx_end] = 1.0
+                    focal = args.slot_focal_ctx
+                    ctx_start = max(0, ctx_end - focal) if focal > 0 else 0
+                    opt_mask[i, ctx_start:ctx_end] = 1.0
             opt_valid = opt_mask.sum()
         else:
             # Standard: optimize on same positions we score (includes future tokens)
@@ -366,7 +377,11 @@ def eval_val_slot(
         use_delta = args.slot_mode in ("v1", "lbfgs")
         use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit")
         delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=use_delta)
-        logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
+        # Warm-start: initialize logit_bias from previous batch's mean
+        if warmstart_bias is not None and args.slot_warmstart and args.causal_slot:
+            logit_bias = warmstart_bias.expand(bsz, 1, -1).clone().detach().requires_grad_(True)
+        else:
+            logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
         opt_params = [logit_bias] + ([delta] if use_delta else [])
         targets_flat = yb.reshape(-1)
         # Skip SLOT optimization if no context to optimize on (causal mode, first window)
@@ -385,6 +400,11 @@ def eval_val_slot(
                 return loss
             for step_i in range(n_slot_steps):
                 slot_opt.step(lbfgs_closure)
+                if args.slot_clamp > 0:
+                    with torch.no_grad():
+                        logit_bias.clamp_(-args.slot_clamp, args.slot_clamp)
+                        if use_delta:
+                            delta.clamp_(-args.slot_clamp, args.slot_clamp)
         elif n_slot_steps > 0:
             slot_opt = torch.optim.AdamW(opt_params, lr=args.slot_lr, weight_decay=1e-8, eps=1e-5)
             for step_i in range(n_slot_steps):
@@ -399,6 +419,14 @@ def eval_val_slot(
                 slot_loss = (nll * opt_mask).sum() / opt_valid
                 slot_loss.backward()
                 slot_opt.step()
+                if args.slot_clamp > 0:
+                    with torch.no_grad():
+                        logit_bias.clamp_(-args.slot_clamp, args.slot_clamp)
+                        if use_delta:
+                            delta.clamp_(-args.slot_clamp, args.slot_clamp)
+        # Update warm-start state
+        if args.slot_warmstart and args.causal_slot:
+            warmstart_bias = logit_bias.detach().mean(dim=0, keepdim=True)
         with torch.no_grad():
             h = (hidden_f + delta.detach()) if use_delta else hidden_f
             lp = F.linear(h, proj_w) + logit_bias.detach()
