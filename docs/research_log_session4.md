@@ -113,8 +113,58 @@ FiLM's advantage is from faster steps, but 8×H100 data parallelism may reduce t
 - Test: FiLM vs standard architecture as SLOT base
 - Risk: SLOT legality uncertain
 
+## Completed Experiments (Session 4)
+
+### EXP-1: SLOT Compatibility Test on FiLM (1×H100)
+
+**Config**: FiLM 5→7+8xMLP, SP1024, 600s train (1716 steps @ 349ms/step), SLOT-24 stride=96
+**Checkpoint**: experiments/film_slot_test/run_20260404_213815/final_model.pt
+
+| Configuration | BPB | Delta vs no-SLOT |
+|--------------|-----|------------------|
+| No SLOT (int6) | **1.3003** | — |
+| **Standard SLOT** | **0.9028** | **-0.3975** |
+| **Causal SLOT** | **1.3095** | **+0.0092 (WORSE)** |
+
+#### Analysis
+1. **Standard SLOT works spectacularly on FiLM** — 0.40 BPP improvement, larger than the
+   ~0.25 BPP seen on non-FiLM architectures. This is the biggest SLOT gain observed in any
+   submission we've measured.
+   
+   Hypothesis: FiLM's shared blocks create more uniform hidden state distributions across
+   layers. The per-sample delta has higher leverage because it shifts ALL virtual layer
+   representations simultaneously (shared blocks apply the same weights to the shifted
+   hidden state at every depth).
+
+2. **Causal SLOT hurts FiLM** — +0.009 BPP worse than no SLOT. The delta optimized on
+   context-only positions (0..wlen-stride) does not transfer to new positions (wlen-stride..wlen).
+   
+   Root cause (speculation): FiLM's shared blocks mean the hidden state at context positions
+   is structurally very similar to the hidden state at new positions. But the OPTIMAL delta
+   for predicting context tokens (which the model has already seen in prior windows) is
+   different from the optimal delta for predicting NEW tokens. Context positions are "easy"
+   (high confidence predictions), new positions are "hard" — the delta overfits to the easy case.
+   
+   This is architecture-specific: non-FiLM models have more layer-wise specialization, so
+   the context-optimized delta may generalize better to new positions. FiLM's uniformity
+   means the delta is more position-dependent, not less.
+
+3. **Strategic implication**: Standard SLOT is our strongest technique but may be illegal.
+   Causal SLOT is not viable on FiLM. We need to either:
+   a) Bet on standard SLOT being ruled legal (risky)
+   b) Focus on non-SLOT improvements (SP4096, depth recurrence, etc.)
+   c) Develop a novel SLOT variant that is provably causal AND works on FiLM
+
+#### Possible causal SLOT improvements to try
+- L-BFGS instead of AdamW (PR #1350 used L-BFGS)
+- Optimize only logit_bias, not delta (less capacity = less overfitting to context)
+- Larger stride (more context relative to new positions)
+- Focal loss on context positions closest to the scoring boundary
+- Warm-start delta from previous window's solution
+
 ## Immediate Priorities
-1. Run FiLM 5→7+8xMLP on THIS H100 for 600s to re-verify our baseline
-2. Verify FiLM+Causal SLOT works on 1×H100 (even if slow)
+1. ~~Run FiLM 5→7+8xMLP on THIS H100 for 600s to re-verify our baseline~~ ✓ (1.3003 BPB)
+2. ~~Verify FiLM+Causal SLOT works on 1×H100~~ ✓ (hurts: +0.009)
 3. Test SP4096 tokenizer with FiLM
 4. Profile the non-SLOT frontier techniques individually on 1×H100
+5. Try improved causal SLOT variants (L-BFGS, logit-only, focal loss)
