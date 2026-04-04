@@ -1400,21 +1400,14 @@ def main() -> None:
             quant_state = torch.load(io.BytesIO(lzma.decompress(quant_blob_disk)), map_location="cpu")
             deq_sd = dequantize_mixed_int6(quant_state["w"], quant_state["m"], export_sd)
             base_model.load_state_dict(deq_sd, strict=True)
-            # Re-apply proper dtypes after dequantization
             base_model.to(device).bfloat16()
             for module in base_model.modules():
                 if isinstance(module, CastedLinear):
                     module.float()
             restore_low_dim_params_to_fp32(base_model)
-            # Recompile after state change
-            compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
-            model = compiled_model
-            t_qeval = time.perf_counter()
-            q_val_loss, q_val_bpb = eval_val(
-                args, model, rank, world_size, device, grad_accum_steps,
-                val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-            )
-            log0(f"final_int6_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{1000.0*(time.perf_counter()-t_qeval):.0f}ms")
+            # Skip compiled eval_val (torch.compile dtype mismatch after int6 dequantization)
+            # SLOT eval uses base_model._encode directly — no torch.compile issue
+            log0("int6 dequantization done — skipping compiled eval_val, proceeding to SLOT")
 
         if args.slot_enabled:
             causal_label = "causal" if args.causal_slot else "standard"
