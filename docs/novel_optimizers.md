@@ -61,3 +61,45 @@ Makes optimizer equivariant to both input and output feature scaling.
   undoes the column benefit.
 - **Novel insight:** The choice of pre-NS5 normalization axis (row vs column) matters
   and depends on the architecture's input distribution characteristics.
+- **MuonEq-C killed at convergence:** Early advantage (-0.013 at step 200) evaporates
+  to +0.0005 worse at step 1722. Row-equivariance wins at long training.
+
+## v2: Weight-aware optimizers (ALL KILLED)
+
+Three optimizers that use W (current weights) — information Muon ignores:
+- **NSG (null-space gradient)**: +0.008 worse. Projecting away W's column space doesn't help.
+- **WIP (weight-inverse precond)**: crashed (Cholesky instability).
+- **Procrustes (multiplicative rotation)**: diverged to 18.29 BPB.
+
+## Deep theoretical analysis
+
+### Why Muon is provably hard to beat
+
+Key identity: G @ (G^TG)^{-1/2} = UV^T (the polar factor).
+
+This means Muon computes the EXACT optimal right-preconditioning of G
+by the gradient's own covariance structure. It's the solution to:
+
+  argmax_X tr(G^T X) subject to ||X||_2 ≤ 1
+
+To beat Muon at the same cost, we need information BEYOND the current
+gradient. The gradient already encodes weight information via chain rule.
+
+### GPU performance constraints
+
+NS5 (5 matrix multiplications) is perfectly suited to GPU SIMD:
+- 512×512: NS5=0.32ms, QR=4.01ms (NS5 is 12× faster)
+- 4096×512: NS5=3.69ms, QR=9.90ms (NS5 is 2.7× faster)
+- SVD: 53ms for 512×512 (166× slower than NS5)
+
+Any alternative must be expressible as a SHORT SEQUENCE OF MATRIX
+MULTIPLICATIONS to compete with NS5 on GPU. QR, SVD, Cholesky all
+use sequential operations that GPUs handle poorly.
+
+### What COULD beat Muon (theoretical)
+
+Information sources beyond the current gradient:
+1. Gradient HISTORY (momentum does this, but in element space not spectral space)
+2. Loss landscape curvature (2nd-order info — too expensive)
+3. Cross-layer gradient correlations (unexplored, could help)
+4. Data distribution statistics (batch-level information)
