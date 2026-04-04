@@ -96,10 +96,40 @@ Any alternative must be expressible as a SHORT SEQUENCE OF MATRIX
 MULTIPLICATIONS to compete with NS5 on GPU. QR, SVD, Cholesky all
 use sequential operations that GPUs handle poorly.
 
-### What COULD beat Muon (theoretical)
+### Correction: Muon is NOT "provably optimal" in general
 
-Information sources beyond the current gradient:
-1. Gradient HISTORY (momentum does this, but in element space not spectral space)
-2. Loss landscape curvature (2nd-order info — too expensive)
-3. Cross-layer gradient correlations (unexplored, could help)
-4. Data distribution statistics (batch-level information)
+Muon solves: argmax tr(G^T X) s.t. ||X||₂ ≤ 1.
+This is optimal for THAT specific objective. But:
+
+1. **The gradient is noisy.** Maximizing correlation with a noisy signal isn't ideal.
+   A denoised gradient (running average of spectral structure) might be better.
+2. **The spectral norm constraint is arbitrary.** Why not rank-k? Nuclear norm? 
+   A rank-k update filters noise — if gradient signal is in top-k directions,
+   the rest is noise that Muon preserves.
+3. **Layers are coupled.** Muon treats each layer independently. The optimal update
+   for W₁ depends on what update W₂ gets.
+4. **No curvature information.** High-gradient, high-curvature directions get large 
+   updates from Muon but should get SMALL updates (Newton direction).
+
+### Reformulating gradient descent: alternative axioms
+
+Muon's axioms: update should be (1) orthogonal, (2) max-correlated with G, (3) memoryless.
+Changing any axiom gives a different optimizer:
+
+**Change axiom 1 (orthogonal → low-rank):**
+Rank-k update via power iteration: U_k V_k^T from top-k singular vectors.
+Cost: O(k × mn) — potentially 60× cheaper than NS5 for k=32.
+Hypothesis: top-32 singular directions capture the gradient signal, rest is noise.
+
+**Change axiom 2 (single-step → denoised):**
+Spectral momentum: maintain running EMA of G^TG covariance.
+Whiten gradient using averaged covariance instead of single-step.
+This gives G @ C_ema^{-1/2} ≈ denoised UV^T.
+
+**Change axiom 3 (memoryless → history-aware):**
+Track the persistent subspace across steps. Update only in directions
+that are consistently important (appear in gradient's top-k for multiple steps).
+
+### v3 experiments (running)
+1. **Low-rank (k=32):** Replace NS5 with 3-step power iteration for top-32 SVD.
+2. **Spectral momentum:** EMA of G^TG → NS5 on averaged covariance → whiten G.
