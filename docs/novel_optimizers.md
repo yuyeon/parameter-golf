@@ -40,3 +40,24 @@ Could help when input features have very different scales.
 Normalize BOTH rows and columns (Sinkhorn-like alternation).
 Makes optimizer equivariant to both input and output feature scaling.
 1 round: row-normalize, then column-normalize.
+
+## Results (200 steps, FiLM 5→7+8xMLP, seed=42)
+
+| Optimizer | BPB@200 | ms/step | vs MuonEq-R |
+|-----------|---------|---------|-------------|
+| **MuonEq-C** | **1.6098** | 354 | **-0.0095 BETTER** |
+| MuonEq-R | 1.6193 | 353 | baseline |
+| MuonEq-RC | 1.6201 | 354 | +0.0008 (noise) |
+| Muon-Soft | 1.9398 | 350 | +0.320 KILL |
+| Spectral | 2.3530 | 358 | +0.734 KILL |
+
+### Analysis
+- **Full NS5 orthogonalization is essential.** Partial (2 steps) or spectral normalization
+  both catastrophically worse. The gradient's singular values must be flattened.
+- **Column normalization > row normalization for FiLM.** Shared blocks see heterogeneous
+  inputs from different virtual layers (FiLM modulation). Column normalization equalizes
+  input-feature scales, which is the dominant conditioning issue.
+- **Bi-equivariant is neutral.** Row normalization after column normalization partially
+  undoes the column benefit.
+- **Novel insight:** The choice of pre-NS5 normalization axis (row vs column) matters
+  and depends on the architecture's input distribution characteristics.
