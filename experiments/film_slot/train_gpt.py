@@ -80,6 +80,7 @@ class Hyperparameters:
     slot_lr = float(os.environ.get("SLOT_LR", 0.012))
     slot_lr_min = float(os.environ.get("SLOT_LR_MIN", 0.001))
     slot_batch_seqs = int(os.environ.get("SLOT_BATCH_SEQS", 32))
+    causal_slot = bool(int(os.environ.get("CAUSAL_SLOT", "0")))  # 1 = optimize on context-only (already-scored positions)
     eval_stride = int(os.environ.get("EVAL_STRIDE", 96))
     eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 0))  # 0 = use train_seq_len
 
@@ -333,19 +334,36 @@ def eval_val_slot(
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             hidden = compiled_encode(xb)
         hidden_f = hidden.detach().float()
-        mask = torch.zeros(bsz, seq_s, device=device)
+        # Scoring mask: positions to report loss for (new positions only)
+        score_mask = torch.zeros(bsz, seq_s, device=device)
         for i, ws in enumerate(bws):
             wlen = wlens[i]
             s = 0 if ws == 0 else max(wlen - stride, 0)
-            mask[i, s:wlen] = 1.0
-        valid_count = mask.sum()
+            score_mask[i, s:wlen] = 1.0
+        valid_count = score_mask.sum()
         if valid_count == 0:
             continue
+        # Optimization mask: what positions drive SLOT gradient
+        if args.causal_slot:
+            # Causal: optimize only on already-scored context positions (0..wlen-stride)
+            opt_mask = torch.zeros(bsz, seq_s, device=device)
+            for i, ws in enumerate(bws):
+                wlen = wlens[i]
+                ctx_end = max(wlen - stride, 0) if ws > 0 else 0
+                if ctx_end > 0:
+                    opt_mask[i, :ctx_end] = 1.0
+            opt_valid = opt_mask.sum()
+        else:
+            # Standard: optimize on same positions we score (includes future tokens)
+            opt_mask = score_mask
+            opt_valid = valid_count
         delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=True)
         logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
         slot_opt = torch.optim.AdamW([delta, logit_bias], lr=args.slot_lr, weight_decay=1e-8, eps=1e-5)
         targets_flat = yb.reshape(-1)
-        for step_i in range(args.slot_steps):
+        # Skip SLOT optimization if no context to optimize on (causal mode, first window)
+        n_slot_steps = args.slot_steps if opt_valid > 0 else 0
+        for step_i in range(n_slot_steps):
             lr_t = args.slot_lr_min + 0.5 * (args.slot_lr - args.slot_lr_min) * (1 + math.cos(math.pi * step_i / args.slot_steps))
             for pg in slot_opt.param_groups:
                 pg['lr'] = lr_t
@@ -354,7 +372,7 @@ def eval_val_slot(
             lp = F.linear(h, proj_w) + logit_bias
             lg = softcap * torch.tanh(lp / softcap)
             nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
-            slot_loss = (nll * mask).sum() / valid_count
+            slot_loss = (nll * opt_mask).sum() / opt_valid
             slot_loss.backward()
             slot_opt.step()
         with torch.no_grad():
@@ -1335,6 +1353,75 @@ def main() -> None:
     # -----------------------------
     # MAIN TRAINING LOOP
     # -----------------------------
+
+    # LOAD_CHECKPOINT: skip training, load saved weights, jump to eval
+    load_ckpt = os.environ.get("LOAD_CHECKPOINT", "")
+    if load_ckpt:
+        log0(f"LOAD_CHECKPOINT: loading {load_ckpt}, skipping training")
+        base_model.load_state_dict(torch.load(load_ckpt, map_location="cpu"), strict=True)
+        base_model.to(device).bfloat16()
+        for module in base_model.modules():
+            if isinstance(module, CastedLinear):
+                module.float()
+        restore_low_dim_params_to_fp32(base_model)
+        # Jump past training to serialization/eval
+        step = 1000  # fake step count so EMA skip doesn't trigger on "step < 200"
+        # Go directly to serialization
+        if master_process:
+            torch.save(base_model.state_dict(), "final_model.pt")
+            log0(f"Saved loaded checkpoint as final_model.pt")
+
+        # Skip int8, go straight to int6 + SLOT
+        use_int6 = bool(int(os.environ.get("USE_INT6", "1")))
+        if use_int6:
+            export_sd = {k: v.detach().cpu() for k, v in base_model.state_dict().items()}
+            log0("gptq:generating autoregressive calibration data (64 seqs x 1024 tokens, temp=0.8)...")
+            t_gen = time.perf_counter()
+            ar_tokens = generate_autoregressive_calib(
+                base_model, device, num_seqs=64, seq_len=args.train_seq_len,
+                vocab_size=args.vocab_size, temperature=0.8, batch_size=8, seed=args.seed,
+            )
+            log0(f"gptq:generated {len(ar_tokens)} sequences in {time.perf_counter()-t_gen:.1f}s")
+            log0("gptq:collecting hessians from autoregressive data...")
+            hessians = collect_hessians_from_tokens(base_model, ar_tokens, device)
+            log0(f"gptq:collected hessians for {len(hessians)} layers")
+            del ar_tokens
+            torch.cuda.empty_cache()
+            quant_result, quant_meta = mixed_quantize_int6(export_sd, {"mlp", "attn"}, hessians=hessians)
+            quant_buf = io.BytesIO()
+            torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
+            quant_blob = lzma.compress(quant_buf.getvalue(), preset=9)
+            if master_process:
+                with open("final_model.int6.ptz", "wb") as f:
+                    f.write(quant_blob)
+                log0(f"Serialized model int6+lzma: {len(quant_blob)} bytes")
+            with open("final_model.int6.ptz", "rb") as f:
+                quant_blob_disk = f.read()
+            quant_state = torch.load(io.BytesIO(lzma.decompress(quant_blob_disk)), map_location="cpu")
+            deq_sd = dequantize_mixed_int6(quant_state["w"], quant_state["m"], export_sd)
+            base_model.load_state_dict(deq_sd, strict=True)
+            t_qeval = time.perf_counter()
+            q_val_loss, q_val_bpb = eval_val(
+                args, model, rank, world_size, device, grad_accum_steps,
+                val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            )
+            log0(f"final_int6_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{1000.0*(time.perf_counter()-t_qeval):.0f}ms")
+
+        if args.slot_enabled:
+            causal_label = "causal" if args.causal_slot else "standard"
+            log0(f"slot({causal_label}):starting steps={args.slot_steps} lr={args.slot_lr} stride={args.eval_stride}")
+            t_slot = time.perf_counter()
+            slot_val_loss, slot_val_bpb = eval_val_slot(
+                args, base_model, rank, world_size, device,
+                val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            )
+            log0(f"final_slot({causal_label}) val_loss:{slot_val_loss:.4f} val_bpb:{slot_val_bpb:.4f} "
+                 f"steps:{args.slot_steps} lr:{args.slot_lr} eval_time:{1000.0*(time.perf_counter()-t_slot):.0f}ms")
+            log0(f"final_slot({causal_label})_exact val_loss:{slot_val_loss:.8f} val_bpb:{slot_val_bpb:.8f}")
+
+        if distributed:
+            dist.destroy_process_group()
+        return
 
     # EMA state: track exponential moving average of all parameters
     ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
