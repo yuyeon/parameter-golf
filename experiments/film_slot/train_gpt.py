@@ -1400,6 +1400,15 @@ def main() -> None:
             quant_state = torch.load(io.BytesIO(lzma.decompress(quant_blob_disk)), map_location="cpu")
             deq_sd = dequantize_mixed_int6(quant_state["w"], quant_state["m"], export_sd)
             base_model.load_state_dict(deq_sd, strict=True)
+            # Re-apply proper dtypes after dequantization
+            base_model.to(device).bfloat16()
+            for module in base_model.modules():
+                if isinstance(module, CastedLinear):
+                    module.float()
+            restore_low_dim_params_to_fp32(base_model)
+            # Recompile after state change
+            compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+            model = compiled_model
             t_qeval = time.perf_counter()
             q_val_loss, q_val_bpb = eval_val(
                 args, model, rank, world_size, device, grad_accum_steps,
