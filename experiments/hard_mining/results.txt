@@ -1,0 +1,6 @@
+=== HARD_FRAC=0 ===
+step:200/200 train_loss:2.6935 train_time:73670ms step_avg:368.35ms
+step:200/200 val_loss:2.7421 val_bpb:1.6240 train_time:73671ms step_avg:368.36ms
+=== HARD_FRAC=0.5 ===
+step:200/200 train_loss:4.3678 train_time:70505ms step_avg:352.53ms
+step:200/200 val_loss:4.3940 val_bpb:2.6023 train_time:70505ms step_avg:352.53ms
