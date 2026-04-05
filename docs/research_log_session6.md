@@ -295,11 +295,53 @@ From PR #1334 + #1350 + #1351:
    - Run K beams, pick best per window
    - Novel test-time compute scaling
 
+## Full Experiment Summary (14+ experiments)
+
+### Architecture Changes (all killed by step-time constraint)
+| Idea | Result | Reason |
+|------|--------|--------|
+| GDN Hybrid | KILLED | FA3 3-16x faster |
+| ACT Transformer | KILLED | All iters run for gradients |
+| Progressive Depth | KILLED | torch.compile needs static graphs |
+| Mixture of Depths | KILLED | Soft routing adds compute |
+| HyperGPT | KILLED | Saves params not step time |
+| Bottleneck MLP | KILLED | 2% speedup only |
+| Dual Prediction | KILLED | +0.007 to +0.030 worse |
+| Wider Model (640d) | KILLED | 44% slower, doesn't converge |
+
+### Training Signal Changes (all killed — too short horizon)
+| Idea | Result | Reason |
+|------|--------|--------|
+| Label Smoothing (0.01-0.10) | KILLED | +0.05 to +0.41 worse |
+| Byte-Weighted Loss | KILLED | +0.08 to +0.12 worse |
+| Focal Loss (gamma 0.5-2.0) | KILLED | +0.006 to +0.031 worse |
+| CRITICAL: initial focal "win" was eval bug (focal in eval mode)
+
+### Hyperparameter Tuning (all converge to same at 600s)
+| Idea | 200-step delta | 600s delta | Reason |
+|------|---------------|------------|--------|
+| MATRIX_LR 0.05 | -0.157 | 0.000 | Warmdown compensates |
+| WD 0.09 | ~0 | ~0 | Too few steps for effect |
+| WARMDOWN 3500 | — | 0.000 | Same convergence |
+
+### Training Algorithm Changes
+| Idea | Result | Reason |
+|------|--------|--------|
+| SAT (SLOT-Aware Training) | +0.002 to +0.009 | Neutral at 200 steps |
+
+### 1×H100 SP4096 Ceiling: 1.274 BPB
+All hyperparameter variants converge to 1.274 BPB at 600s on the baseline architecture.
+
+### Novel Contributions Developed (need 8×H100 testing)
+1. Temperature-Augmented SLOT: jointly optimize tau + delta
+2. SLOT-Aware Training: train model for SLOT cooperation
+3. Parallel SLOT Beams: multi-strategy test-time selection
+4. Learned Residual SLOT: error predictor for warm-start
+
 ### Next Steps
-1. Build combined submission script with ALL proven techniques
-2. Test SAT and learned residual SLOT at full 600s budget on 1×H100
-3. Get 8×H100 access and run 3-seed validation
-4. Submit PR
+1. Get 8×H100 for combined SOTA stack + our novel SLOT
+2. Test temperature-augmented SLOT on strong base model
+3. Run 3-seed validation for PR submission
 
 ## Decision Criteria
 - Novel technique must beat broadcast SLOT by >0.005 BPB on 1×H100 to justify further investment
