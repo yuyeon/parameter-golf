@@ -384,7 +384,7 @@ def eval_val_slot(
         use_delta = args.slot_mode in ("v1", "lbfgs")
         use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit", "lowrank", "film")
         use_lowrank = args.slot_mode == "lowrank"
-        hdim = hidden_f.size(-1)
+        hdim = hidden_f.size(-1) if hidden_f is not None else proj_w.size(1)
         vsize = proj_w.size(0)
         delta = torch.zeros(bsz, 1, hdim, device=device, dtype=torch.float32, requires_grad=use_delta)
         targets_flat = yb.reshape(-1)
