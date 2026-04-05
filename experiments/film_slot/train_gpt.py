@@ -84,8 +84,10 @@ class Hyperparameters:
     eval_stride = int(os.environ.get("EVAL_STRIDE", 96))
     eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 0))  # 0 = use train_seq_len
     # SLOT optimization mode: "v1" (original AdamW delta+bias), "logit_only" (AdamW bias only),
-    # "lbfgs" (L-BFGS delta+bias), "lbfgs_logit" (L-BFGS logit bias only)
+    # "lbfgs" (L-BFGS delta+bias), "lbfgs_logit" (L-BFGS logit bias only),
+    # "lowrank" (L-BFGS low-rank hidden→logit correction, position-dependent)
     slot_mode = os.environ.get("SLOT_MODE", "v1")
+    slot_lowrank_r = int(os.environ.get("SLOT_LOWRANK_R", 8))
     slot_lbfgs_history = int(os.environ.get("SLOT_LBFGS_HISTORY", 20))
     # Focal context: only use last N context tokens for causal SLOT loss (0 = all context)
     slot_focal_ctx = int(os.environ.get("SLOT_FOCAL_CTX", 128))
@@ -375,15 +377,25 @@ def eval_val_slot(
             opt_mask = score_mask
             opt_valid = valid_count
         use_delta = args.slot_mode in ("v1", "lbfgs")
-        use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit")
-        delta = torch.zeros(bsz, 1, hidden_f.size(-1), device=device, dtype=torch.float32, requires_grad=use_delta)
-        # Warm-start: initialize logit_bias from previous batch's mean
-        if warmstart_bias is not None and args.slot_warmstart and args.causal_slot:
-            logit_bias = warmstart_bias.expand(bsz, 1, -1).clone().detach().requires_grad_(True)
-        else:
-            logit_bias = torch.zeros(bsz, 1, proj_w.size(0), device=device, dtype=torch.float32, requires_grad=True)
-        opt_params = [logit_bias] + ([delta] if use_delta else [])
+        use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit", "lowrank")
+        use_lowrank = args.slot_mode == "lowrank"
+        hdim = hidden_f.size(-1)
+        vsize = proj_w.size(0)
+        delta = torch.zeros(bsz, 1, hdim, device=device, dtype=torch.float32, requires_grad=use_delta)
         targets_flat = yb.reshape(-1)
+        # Low-rank mode: learn U:[hdim,r] V:[r,vocab] correction projection
+        if use_lowrank:
+            r = args.slot_lowrank_r
+            slot_U = torch.zeros(hdim, r, device=device, dtype=torch.float32, requires_grad=True)
+            slot_V = torch.zeros(r, vsize, device=device, dtype=torch.float32, requires_grad=True)
+            opt_params = [slot_U, slot_V]
+        else:
+            # Warm-start: initialize logit_bias from previous batch's mean
+            if warmstart_bias is not None and args.slot_warmstart and args.causal_slot:
+                logit_bias = warmstart_bias.expand(bsz, 1, -1).clone().detach().requires_grad_(True)
+            else:
+                logit_bias = torch.zeros(bsz, 1, vsize, device=device, dtype=torch.float32, requires_grad=True)
+            opt_params = [logit_bias] + ([delta] if use_delta else [])
         # Skip SLOT optimization if no context to optimize on (causal mode, first window)
         n_slot_steps = args.slot_steps if opt_valid > 0 else 0
         if use_lbfgs and n_slot_steps > 0:
@@ -392,7 +404,11 @@ def eval_val_slot(
             def lbfgs_closure():
                 slot_opt.zero_grad()
                 h = hidden_f + delta if use_delta else hidden_f
-                lp = F.linear(h, proj_w) + logit_bias
+                lp = F.linear(h, proj_w)
+                if use_lowrank:
+                    lp = lp + (h @ slot_U) @ slot_V  # position-dependent correction
+                else:
+                    lp = lp + logit_bias
                 lg = softcap * torch.tanh(lp / softcap)
                 nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
                 loss = (nll * opt_mask).sum() / opt_valid
@@ -400,7 +416,7 @@ def eval_val_slot(
                 return loss
             for step_i in range(n_slot_steps):
                 slot_opt.step(lbfgs_closure)
-                if args.slot_clamp > 0:
+                if args.slot_clamp > 0 and not use_lowrank:
                     with torch.no_grad():
                         logit_bias.clamp_(-args.slot_clamp, args.slot_clamp)
                         if use_delta:
@@ -425,11 +441,15 @@ def eval_val_slot(
                         if use_delta:
                             delta.clamp_(-args.slot_clamp, args.slot_clamp)
         # Update warm-start state
-        if args.slot_warmstart and args.causal_slot:
+        if args.slot_warmstart and args.causal_slot and not use_lowrank:
             warmstart_bias = logit_bias.detach().mean(dim=0, keepdim=True)
         with torch.no_grad():
             h = (hidden_f + delta.detach()) if use_delta else hidden_f
-            lp = F.linear(h, proj_w) + logit_bias.detach()
+            lp = F.linear(h, proj_w)
+            if use_lowrank:
+                lp = lp + (h @ slot_U.detach()) @ slot_V.detach()
+            else:
+                lp = lp + logit_bias.detach()
             lg = softcap * torch.tanh(lp / softcap)
             nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
             for i, ws in enumerate(bws):
