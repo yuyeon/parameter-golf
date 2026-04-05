@@ -157,15 +157,27 @@ vs. competition:
 
 **Assessment**: 8×H100 test is worth running. Most likely outcome: ~1.00-1.05 BPB.
 
+## Low-Rank SLOT Result
+
+**lowrank mode (r=8, U:[512,8] V:[8,1024]): 1.2658 BPB — identical to broadcast.**
+
+Position-dependent corrections don't help. The optimal correction IS position-independent
+(a constant logit bias). This means the model's per-sample errors are NOT well-correlated
+with hidden states across positions. The -0.035 is a hard ceiling for logit-space causal
+SLOT on this base model (1.30 BPB).
+
+On a better base model (8×H100, ~1.10 BPB), the ceiling should be higher because:
+- Better-trained models have more consistent per-document patterns
+- Token frequency biases become more exploitable
+- The model's errors may become more position-dependent
+
 ## What's Left to Improve
 
-The causal SLOT improvement is capped at -0.035 on our 1×H100 base model.
-Possible paths to improve:
-1. Better base model (more steps on 8×H100) → SLOT improvement should increase
-2. Per-position or low-rank logit bias → more expressive optimization
-3. FiLM-modulation SLOT → optimize FiLM params at test time (novel)
-4. Progressive causal SLOT → multi-pass with expanding context
-5. Pre-quant TTT (before GPTQ) → orthogonal to SLOT
+The causal SLOT ceiling on this base model is -0.035. Two paths forward:
+1. **Better base model (8×H100)** → SLOT improvement should increase to -0.06 to -0.08
+2. **FiLM-modulation SLOT** → optimize FiLM params at test time, changes HOW the model
+   processes data rather than correcting outputs. Requires re-running forward pass.
+3. **Pre-quant TTT (before GPTQ)** → orthogonal to SLOT, -0.009 BPP from competition data
 
 ## Next Steps
 1. [TODO] Prepare 8×H100 submission script with FiLM + SP4096 + QK-Gain + causal SLOT
