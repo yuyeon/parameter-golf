@@ -85,7 +85,8 @@ class Hyperparameters:
     eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 0))  # 0 = use train_seq_len
     # SLOT optimization mode: "v1" (original AdamW delta+bias), "logit_only" (AdamW bias only),
     # "lbfgs" (L-BFGS delta+bias), "lbfgs_logit" (L-BFGS logit bias only),
-    # "lowrank" (L-BFGS low-rank hidden→logit correction, position-dependent)
+    # "lowrank" (L-BFGS low-rank hidden→logit correction, position-dependent),
+    # "film" (optimize FiLM modulation params at test time — novel, requires full forward pass)
     slot_mode = os.environ.get("SLOT_MODE", "v1")
     slot_lowrank_r = int(os.environ.get("SLOT_LOWRANK_R", 8))
     slot_lbfgs_history = int(os.environ.get("SLOT_LBFGS_HISTORY", 20))
@@ -347,9 +348,12 @@ def eval_val_slot(
             wlens.append(wlen)
             xb[i, :wlen] = val_tokens[ws:wend].to(device)
             yb[i, :wlen] = val_tokens[ws + 1:wend + 1].to(device)
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            hidden = compiled_encode(xb)
-        hidden_f = hidden.detach().float()
+        if args.slot_mode != "film":
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                hidden = compiled_encode(xb)
+            hidden_f = hidden.detach().float()
+        else:
+            hidden_f = None  # film mode uses full forward pass
         # Scoring mask: positions to report loss for (new positions only)
         score_mask = torch.zeros(bsz, seq_s, device=device)
         for i, ws in enumerate(bws):
@@ -376,15 +380,23 @@ def eval_val_slot(
             # Standard: optimize on same positions we score (includes future tokens)
             opt_mask = score_mask
             opt_valid = valid_count
+        use_film = args.slot_mode == "film"
         use_delta = args.slot_mode in ("v1", "lbfgs")
-        use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit", "lowrank")
+        use_lbfgs = args.slot_mode in ("lbfgs", "lbfgs_logit", "lowrank", "film")
         use_lowrank = args.slot_mode == "lowrank"
         hdim = hidden_f.size(-1)
         vsize = proj_w.size(0)
         delta = torch.zeros(bsz, 1, hdim, device=device, dtype=torch.float32, requires_grad=use_delta)
         targets_flat = yb.reshape(-1)
+        # FiLM mode: optimize FiLM modulation deltas (full forward pass per step)
+        if use_film:
+            n_vl = base_model.film.attn_scales.size(0)
+            d_attn = torch.zeros(n_vl, hdim, device=device, dtype=torch.float32, requires_grad=True)
+            d_mlp = torch.zeros(n_vl, hdim, device=device, dtype=torch.float32, requires_grad=True)
+            d_mix = torch.zeros(n_vl, 2, hdim, device=device, dtype=torch.float32, requires_grad=True)
+            opt_params = [d_attn, d_mlp, d_mix]
         # Low-rank mode: learn U:[hdim,r] V:[r,vocab] correction projection
-        if use_lowrank:
+        elif use_lowrank:
             r = args.slot_lowrank_r
             slot_U = torch.zeros(hdim, r, device=device, dtype=torch.float32, requires_grad=True)
             slot_V = torch.zeros(r, vsize, device=device, dtype=torch.float32, requires_grad=True)
@@ -403,13 +415,18 @@ def eval_val_slot(
                                           history_size=args.slot_lbfgs_history, line_search_fn="strong_wolfe")
             def lbfgs_closure():
                 slot_opt.zero_grad()
-                h = hidden_f + delta if use_delta else hidden_f
-                lp = F.linear(h, proj_w)
-                if use_lowrank:
-                    lp = lp + (h @ slot_U) @ slot_V  # position-dependent correction
+                if use_film:
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        lg = base_model.forward_logits_with_film_delta(xb, d_attn, d_mlp, d_mix)
+                    lg = lg.float()
                 else:
-                    lp = lp + logit_bias
-                lg = softcap * torch.tanh(lp / softcap)
+                    h = hidden_f + delta if use_delta else hidden_f
+                    lp = F.linear(h, proj_w)
+                    if use_lowrank:
+                        lp = lp + (h @ slot_U) @ slot_V
+                    else:
+                        lp = lp + logit_bias
+                    lg = softcap * torch.tanh(lp / softcap)
                 nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
                 loss = (nll * opt_mask).sum() / opt_valid
                 loss.backward()
@@ -444,13 +461,18 @@ def eval_val_slot(
         if args.slot_warmstart and args.causal_slot and not use_lowrank:
             warmstart_bias = logit_bias.detach().mean(dim=0, keepdim=True)
         with torch.no_grad():
-            h = (hidden_f + delta.detach()) if use_delta else hidden_f
-            lp = F.linear(h, proj_w)
-            if use_lowrank:
-                lp = lp + (h @ slot_U.detach()) @ slot_V.detach()
+            if use_film:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    lg = base_model.forward_logits_with_film_delta(xb, d_attn.detach(), d_mlp.detach(), d_mix.detach())
+                lg = lg.float()
             else:
-                lp = lp + logit_bias.detach()
-            lg = softcap * torch.tanh(lp / softcap)
+                h = (hidden_f + delta.detach()) if use_delta else hidden_f
+                lp = F.linear(h, proj_w)
+                if use_lowrank:
+                    lp = lp + (h @ slot_U.detach()) @ slot_V.detach()
+                else:
+                    lp = lp + logit_bias.detach()
+                lg = softcap * torch.tanh(lp / softcap)
             nll = F.cross_entropy(lg.reshape(-1, lg.size(-1)), targets_flat, reduction="none").reshape(bsz, seq_s)
             for i, ws in enumerate(bws):
                 wlen = wlens[i]
@@ -1165,6 +1187,38 @@ class GPT(nn.Module):
     def forward_logits(self, input_ids: Tensor) -> Tensor:
         """Return logits (bsz, seq_len, vocab) without computing loss."""
         x = self._encode(input_ids)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            logits_proj = self.lm_head(x)
+        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
+    def forward_logits_with_film_delta(
+        self, input_ids: Tensor,
+        d_attn: Tensor, d_mlp: Tensor, d_mix: Tensor,
+    ) -> Tensor:
+        """Forward pass with additive FiLM deltas (for FiLM-modulation SLOT)."""
+        x = self.tok_emb(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
+        skips: list[Tensor] = []
+        for i in range(self.num_encoder_layers):
+            bi = self.block_schedule[i]
+            a_s = self.film.attn_scales[i] + d_attn[i]
+            m_s = self.film.mlp_scales[i] + d_mlp[i]
+            r_m = self.film.resid_mixes[i] + d_mix[i]
+            x = self.blocks[bi](x, x0, a_s, m_s, r_m)
+            skips.append(x)
+        for i in range(self.num_decoder_layers):
+            vi = self.num_encoder_layers + i
+            if skips:
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+            bi = self.block_schedule[vi]
+            a_s = self.film.attn_scales[vi] + d_attn[vi]
+            m_s = self.film.mlp_scales[vi] + d_mlp[vi]
+            r_m = self.film.resid_mixes[vi] + d_mix[vi]
+            x = self.blocks[bi](x, x0, a_s, m_s, r_m)
+        x = self.final_norm(x)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
         else:
