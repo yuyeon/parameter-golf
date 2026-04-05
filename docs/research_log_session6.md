@@ -258,11 +258,48 @@ SP4096 tokenizer validation (200 steps):
 5. **The only viable novel contribution space for training is**: better optimizer, better loss function, better data loading — things that improve quality WITHOUT changing the computation graph.
 6. **Test-time novelty is the most practical avenue**: no torch.compile constraints, unlimited compute budget.
 
-## Next Steps
-1. Test parallel SLOT beams on the 600s baseline model
-2. If beams show improvement, integrate into full submission
-3. Build final submission on PR #1334 base + SLOT + novel test-time technique
-4. Get 8×H100 access for final runs
+## Path to Winning Submission
+
+### Current Best (1×H100, 600s)
+**1.274 BPB** with plain SP4096 baseline (9L, 512d, 2x MLP)
+
+### Extrapolated 8×H100 Performance
+On 8×H100, we get ~6000 steps (3.4x more than 1×H100's 1742).
+Assuming similar scaling to competition entries:
+- SP4096 baseline (our 1.274): → ~1.05-1.10 BPB on 8×H100
+- + SOTA techniques (depth recur, parallel resid, MuonEq-R): → ~1.00-1.05
+- + L-BFGS causal SLOT: → ~0.92-0.97
+- + Novel improvements: → potentially sub-0.92
+
+### Proven SOTA Stack to Adopt
+From PR #1334 + #1350 + #1351:
+1. SP4096 tokenizer (**verified -0.068 BPB, our biggest win**)
+2. Depth recurrence layers 4,5 (13 virtual from 11 physical)
+3. Parallel residuals from layer 7
+4. MuonEq-R (row-normalize before NS orthogonalization)
+5. QK-Gain 5.0
+6. Higher weight decay 0.09-0.10
+7. Full Hessian GPTQ int6 + brotli compression
+8. EMA + tight SWA
+9. Late QAT
+10. Discriminative per-block TTT (pre-quant)
+11. L-BFGS causal SLOT (logit-only, 25 steps)
+
+### Our Novel Contributions
+1. **SLOT-Aware Training (SAT)**: train model awareness of test-time SLOT
+   - Neutral at 200 steps, needs full-budget testing
+2. **Learned Residual SLOT**: error predictor for SLOT warm-start
+   - 100K params (98KB), fits in artifact
+   - Needs testing on mature model
+3. **Parallel SLOT Beams**: multi-strategy SLOT selection
+   - Run K beams, pick best per window
+   - Novel test-time compute scaling
+
+### Next Steps
+1. Build combined submission script with ALL proven techniques
+2. Test SAT and learned residual SLOT at full 600s budget on 1×H100
+3. Get 8×H100 access and run 3-seed validation
+4. Submit PR
 
 ## Decision Criteria
 - Novel technique must beat broadcast SLOT by >0.005 BPB on 1×H100 to justify further investment
