@@ -71,10 +71,40 @@ Instead of optimizing logit biases, optimize FiLM modulation params (attn_scales
 - Could be implemented as "delta to FiLM scales" with clamping
 - **Shelved for now** — focus on getting logit-bias approach working first
 
+## 200-Step Screening Results (parallel GPU runs)
+
+All runs: FiLM 5→7+8xMLP, seed=42, 200 steps, no EMA (200 steps too few).
+GPU contention from 4 parallel runs inflated step times — solo estimates provided.
+
+| Variant | Pre-quant val_bpb@200 | Delta | Solo ms/step est. | Verdict |
+|---------|----------------------|-------|--------------------|---------|
+| SP1024 control | 2.0793 | — | 349 | baseline |
+| **SP4096** | **1.8601** | **-0.219** | ~380 | **PROMOTE — massive win** |
+| QK-Gain 5.0 | 2.0406 | -0.039 | 349 | PROMOTE (free) |
+| Depth 5→9 | 2.0472 | -0.032 | ~442 | INCONCLUSIVE — need 600s test |
+
+**SP4096 is the single biggest improvement at 200 steps.** -0.22 BPB is enormous.
+This is consistent with competition data (every top-5 non-SLOT PR uses SP4096).
+
+Notes:
+- int8 roundtrip BPB unreliable (EMA destroys weights at 200 steps, known issue)
+- SP4096 adds ~1.6M params (27M vs 25.4M), artifact grows ~1.2MB (15.0 vs 13.8MB, still fits 16MB)
+- Depth 5→9 is slower (~27% more ms/step) but same artifact size (shared blocks)
+- QK-Gain 5.0 is free (no speed or size change)
+
+## Causal SLOT Results (so far)
+
+| Variant | BPB | Delta | Notes |
+|---------|-----|-------|-------|
+| Baseline (no SLOT, int6) | 1.3003 | — | FiLM 5→7+8xMLP SP1024 |
+| Causal SLOT v1 (AdamW delta+bias, 24 steps) | 1.3095 | +0.009 | **HURTS** |
+| Causal SLOT lbfgs_logit (4 steps, no focal) | 1.2658 | -0.035 | Confirmed L-BFGS works |
+| Causal SLOT lbfgs_logit (24 steps, no focal) | TBD | TBD | Running now |
+
 ## Next Steps (prioritized)
 1. [RUNNING] Get 24-step L-BFGS baseline result
-2. [QUEUED] Run v2 variants (focal+warmstart+clamp) 
-3. [QUEUED] SP4096 200-step screen
-4. [QUEUED] QK-Gain 5.0 + WD 0.085 screen
-5. [IDEA] Extended depth recurrence (7 → 9-10 virtual layers)
-6. [IDEA] FiLM-modulation SLOT
+2. [QUEUED] Run v2 with focal+warmstart+clamp (PR #1350 approach)
+3. [QUEUED] SP4096 + QK-Gain 5.0 combined 600s run
+4. [QUEUED] SP4096 + QK-Gain 5.0 + causal SLOT 600s run
+5. [QUEUED] Compare best method vs current best legal PR on 1×H100
+6. [IDEA] FiLM-modulation SLOT (novel)
