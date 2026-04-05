@@ -214,6 +214,15 @@ is strictly worse because fewer steps > smaller model.
 **Corollary**: Novel training-time architectures must be FASTER per step, not just more
 parameter-efficient. FA3 + torch.compile + Muon set a very tight speed baseline.
 
+## SP4096 Results (1×H100)
+
+SP4096 tokenizer validation (200 steps):
+- **SP4096: 1.616 BPB** vs SP1024: 1.737 BPB → **-0.121 BPB improvement**
+- Step time: 344ms (only 5% slower than SP1024 at 328ms)
+- This is the single largest free improvement available
+
+600s SP4096 run in progress...
+
 ## 600s Baseline (1×H100)
 - **1.342 BPB** (int8+zlib) at 1197 steps, 502ms/step
 - Model: 9 layers, 512d, 2x MLP, SP1024
