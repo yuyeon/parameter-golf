@@ -190,6 +190,30 @@ The halting mechanism + iteration conditioning add overhead without reducing eff
 (requires specialized hardware support or gradient approximation). With standard backprop
 and torch.compile, all iterations must execute regardless of halting probability.
 
+### Mixture of Depths (MoD) — KILLED
+Soft per-token routing adds overhead without reducing compute. 732ms/step (2.2x slower than baseline 328ms). Compile-safe but useless — the routing gate adds computation, it doesn't remove any.
+
+### HyperGPT (Shared Blocks + FiLM Modulation) — KILLED  
+3 shared blocks → 9 or 12 virtual layers. Weight sharing saves artifact size but NOT step time.
+
+| Config | ms/step | val_bpb@steps | Steps (120s) |
+|--------|---------|---------------|--------------|
+| Baseline 9L (512d) | 328 | 1.721@200 | 365 |
+| HyperGPT 3→12 (512d) | 888 | 2.595@136 | 135 |
+| HyperGPT 3→9 (768d, 4xMLP) | 1279 | 2.996@100 | 94 |
+
+**Root cause**: Step time ∝ number of layer forward passes, not number of unique parameters.
+Sharing parameters saves artifact space but every virtual layer still runs a full forward pass.
+
+### Key Meta-Lesson
+**This competition is step-time-limited, not parameter-limited.** The 16MB budget accommodates
+~25M params (int6), and a 9-layer 512d model uses exactly ~17M. There's even room for more params!
+But 600s at 328ms/step = only ~1800 steps. Any architecture change that increases step time
+is strictly worse because fewer steps > smaller model.
+
+**Corollary**: Novel training-time architectures must be FASTER per step, not just more
+parameter-efficient. FA3 + torch.compile + Muon set a very tight speed baseline.
+
 ## Decision Criteria
 - Novel technique must beat broadcast SLOT by >0.005 BPB on 1×H100 to justify further investment
 - GDN hybrid must be faster per step than pure attention to be worthwhile
