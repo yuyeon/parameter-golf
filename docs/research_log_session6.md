@@ -214,7 +214,37 @@ is strictly worse because fewer steps > smaller model.
 **Corollary**: Novel training-time architectures must be FASTER per step, not just more
 parameter-efficient. FA3 + torch.compile + Muon set a very tight speed baseline.
 
+## 600s Baseline (1×H100)
+- **1.342 BPB** (int8+zlib) at 1197 steps, 502ms/step
+- Model: 9 layers, 512d, 2x MLP, SP1024
+- This is the reference for SLOT beam testing
+
+## Summary of All Novel Architecture Experiments
+
+| Idea | Status | Root Cause of Failure |
+|------|--------|----------------------|
+| GDN Hybrid | KILLED | FA3 is 3-16x faster than GDN on H100 |
+| ACT Transformer | KILLED | All iterations run for gradients → no speedup |
+| Progressive Depth | KILLED | torch.compile needs static graphs |
+| Mixture of Depths | KILLED | Soft routing adds computation, doesn't remove any |
+| HyperGPT | KILLED | Weight sharing saves artifact size, not step time |
+| Bottleneck MLP | KILLED | Kernel launch overhead dominates (2% speedup) |
+
+## Key Meta-Lessons
+
+1. **Competition is step-time-limited**: 600s / 328ms = ~1800 steps max. Any slowdown is fatal.
+2. **FA3 + torch.compile define the speed ceiling**: anything that disrupts these is penalized.
+3. **Parameter budget is NOT the bottleneck**: 16MB fits ~25M params, model only uses ~17M.
+4. **Novel architectures must be strictly faster per step** to win — no "quality for speed" tradeoffs work because the quality gap from fewer steps is always larger.
+5. **The only viable novel contribution space for training is**: better optimizer, better loss function, better data loading — things that improve quality WITHOUT changing the computation graph.
+6. **Test-time novelty is the most practical avenue**: no torch.compile constraints, unlimited compute budget.
+
+## Next Steps
+1. Test parallel SLOT beams on the 600s baseline model
+2. If beams show improvement, integrate into full submission
+3. Build final submission on PR #1334 base + SLOT + novel test-time technique
+4. Get 8×H100 access for final runs
+
 ## Decision Criteria
 - Novel technique must beat broadcast SLOT by >0.005 BPB on 1×H100 to justify further investment
-- GDN hybrid must be faster per step than pure attention to be worthwhile
 - Any technique must fit within 600s training + 600s eval budget on 8×H100
