@@ -122,10 +122,53 @@ hurts SP4096 more, possibly because:
 **Net assessment**: SP4096 is neutral-to-slightly-positive on 1×H100 at 600s.
 On 8×H100 with more training steps, the per-step quality advantage should dominate.
 
-## Next Steps (prioritized)
-1. [RUNNING] Get 24-step L-BFGS baseline result
-2. [QUEUED] Run v2 with focal+warmstart+clamp (PR #1350 approach)
-3. [QUEUED] SP4096 + QK-Gain 5.0 combined 600s run
-4. [QUEUED] SP4096 + QK-Gain 5.0 + causal SLOT 600s run
-5. [QUEUED] Compare best method vs current best legal PR on 1×H100
-6. [IDEA] FiLM-modulation SLOT (novel)
+## Causal SLOT v2 Result (focal+warmstart+clamp)
+
+**Result: 1.2658 BPB — identical to v1 L-BFGS logit.**
+
+The v2 improvements (focal=128, warmstart, clamp=5.0) made NO difference because:
+- L-BFGS converges in ~4 steps regardless of initialization (warmstart irrelevant)
+- Full context and focal-128 context produce the same optimum (focal irrelevant)
+- Logit bias stays within [-5, 5] naturally (clamping irrelevant)
+
+These features were designed for slow optimizers (AdamW) that struggle to converge.
+L-BFGS is too efficient for them to matter.
+
+## Competitiveness Analysis
+
+### 1×H100 head-to-head (actual data)
+| Method | Pre-quant BPB | Int6 BPB | Steps |
+|--------|---------------|----------|-------|
+| **SOTA (#1019)** | 1.3813 | 1.9091 (broken) | 894 |
+| FiLM SP1024 | 1.2863 | 1.3003 | 1716 |
+| FiLM SP1024 + causal SLOT | — | **1.2658** | 1716 |
+| FiLM SP4096 + QK-Gain 5.0 | 1.2813 | 1.3074 | 1221 |
+
+FiLM beats SOTA by **-0.095 BPP** (pre-quant) on 1×H100.
+
+### 8×H100 extrapolation
+- FiLM SP1024: ~1.02-1.06 (SOTA's scaling applied to our 1×H100 advantage)
+- + SP4096 + QK-Gain: ~0.99-1.04
+- + Causal SLOT: ~0.95-1.02
+
+vs. competition:
+- PR #1334 (non-SLOT): 1.0897 → **we likely beat this**
+- PR #1350 (causal SLOT): 1.0046 → **uncertain**
+
+**Assessment**: 8×H100 test is worth running. Most likely outcome: ~1.00-1.05 BPB.
+
+## What's Left to Improve
+
+The causal SLOT improvement is capped at -0.035 on our 1×H100 base model.
+Possible paths to improve:
+1. Better base model (more steps on 8×H100) → SLOT improvement should increase
+2. Per-position or low-rank logit bias → more expressive optimization
+3. FiLM-modulation SLOT → optimize FiLM params at test time (novel)
+4. Progressive causal SLOT → multi-pass with expanding context
+5. Pre-quant TTT (before GPTQ) → orthogonal to SLOT
+
+## Next Steps
+1. [TODO] Prepare 8×H100 submission script with FiLM + SP4096 + QK-Gain + causal SLOT
+2. [TODO] Test FiLM DDP on 1 GPU with torchrun --nproc=1 (verify DDP compatibility)
+3. [IDEA] Explore per-position logit bias for causal SLOT
+4. [IDEA] FiLM-modulation SLOT (novel, potentially high-upside)
