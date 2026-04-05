@@ -221,7 +221,17 @@ SP4096 tokenizer validation (200 steps):
 - Step time: 344ms (only 5% slower than SP1024 at 328ms)
 - This is the single largest free improvement available
 
-600s SP4096 run in progress...
+600s SP4096 result:
+- **SP4096 600s: 1.274 BPB** (int8+zlib) at 1742 steps, 344ms/step
+- **SP1024 600s: 1.342 BPB** (int8+zlib) at 1197 steps, 502ms/step
+- **Delta: -0.068 BPB** from tokenizer alone
+- Artifact: 16.0 MB (int8+zlib, needs int6 for competition)
+- This is the new best 1×H100 baseline
+
+| Config | Steps | ms/step | val_bpb | int8_bpb | Artifact |
+|--------|-------|---------|---------|----------|----------|
+| SP1024 600s | 1197 | 502 | — | 1.342 | 8.9 MB |
+| SP4096 600s | 1742 | 345 | 1.272 | 1.274 | 16.0 MB |
 
 ## 600s Baseline (1×H100)
 - **1.342 BPB** (int8+zlib) at 1197 steps, 502ms/step
