@@ -92,14 +92,35 @@ Notes:
 - Depth 5→9 is slower (~27% more ms/step) but same artifact size (shared blocks)
 - QK-Gain 5.0 is free (no speed or size change)
 
-## Causal SLOT Results (so far)
+## Causal SLOT Results
 
-| Variant | BPB | Delta | Notes |
-|---------|-----|-------|-------|
-| Baseline (no SLOT, int6) | 1.3003 | — | FiLM 5→7+8xMLP SP1024 |
-| Causal SLOT v1 (AdamW delta+bias, 24 steps) | 1.3095 | +0.009 | **HURTS** |
-| Causal SLOT lbfgs_logit (4 steps, no focal) | 1.2658 | -0.035 | Confirmed L-BFGS works |
-| Causal SLOT lbfgs_logit (24 steps, no focal) | TBD | TBD | Running now |
+| Variant | BPB | Delta | Eval time | Notes |
+|---------|-----|-------|-----------|-------|
+| Baseline (no SLOT, int6) | 1.3003 | — | 22s | FiLM 5→7+8xMLP SP1024 |
+| Causal SLOT v1 (AdamW delta+bias, 24 steps) | 1.3095 | +0.009 | 967s | **HURTS** |
+| Causal SLOT lbfgs_logit (4 steps) | 1.2658 | -0.035 | 478s | Confirmed L-BFGS works |
+| Causal SLOT lbfgs_logit (24 steps) | 1.2658 | -0.035 | 2829s | **Same as 4 steps!** |
+| Causal SLOT v2 (focal+warm+clamp, 6 steps) | TBD | TBD | ~700s | Running |
+
+**Critical finding: L-BFGS converges in ~4 steps.** 24 steps = 47 min eval for zero improvement.
+Use 4-6 steps for all future SLOT experiments. This also means the total eval time on 8×H100
+would be ~60s (478s/8 GPUs), which is very reasonable.
+
+## SP4096 + QK-Gain 5.0 (600s full run)
+
+| Config | Pre-quant | Int8 | Int6 | Steps | ms/step | Artifact |
+|--------|-----------|------|------|-------|---------|----------|
+| SP1024 (baseline) | 1.2863 | 1.2961 | 1.3003 | 1716 | 349 | 13.8MB |
+| **SP4096 + QK-Gain 5.0** | **1.2813** | **1.2989** | **1.3074** | 1221 | 492 | 13.2MB |
+
+SP4096 is better pre-quant (-0.005) but worse after int6 (+0.007). The int6 quantization
+hurts SP4096 more, possibly because:
+1. Larger embedding table (4096×512) is harder to quantize
+2. Fewer training steps (1221 vs 1716) → less converged weights
+3. The improvement from SP4096 may compound more at higher step counts (8×H100)
+
+**Net assessment**: SP4096 is neutral-to-slightly-positive on 1×H100 at 600s.
+On 8×H100 with more training steps, the per-step quality advantage should dominate.
 
 ## Next Steps (prioritized)
 1. [RUNNING] Get 24-step L-BFGS baseline result
